@@ -1,15 +1,42 @@
-import { createContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import { PeerConnection } from '../core/PeerConnection';
 import { SignalingClient } from '../core/SignalingClient';
+
+export type JSONSerializable =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | JSONSerializable[]
+  | { [key: string]: JSONSerializable };
+
+export type MessageHandler<TData extends JSONSerializable = JSONSerializable> = (
+  message: Message<TData>
+) => void;
+
+export type Message<TData extends JSONSerializable = JSONSerializable> = {
+  /** The peer ID of the sender */
+  senderId: string;
+  /** The data of the message */
+  data: TData;
+  /** The timestamp of when the message was sent */
+  timestamp: number;
+};
 
 export interface RoomContextValue {
   roomId: string;
   peerId: string;
   peers: string[];
   isConnected: boolean;
-  broadcast: (message: Record<string, unknown>) => void;
-  sendToPeer: (peerId: string, message: Record<string, unknown>) => void;
-  onMessage: (handler: (peerId: string, message: Record<string, unknown>) => void) => void;
+  broadcast: <TData extends JSONSerializable = JSONSerializable>(message: Message<TData>) => void;
+  sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
+    peerId: string,
+    message: Message<TData>
+  ) => void;
+  onMessage: <TData extends JSONSerializable = JSONSerializable>(
+    handler: MessageHandler<TData>
+  ) => () => void;
 }
 
 export const RoomContext = createContext<RoomContextValue | null>(null);
@@ -26,9 +53,7 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
 
   const signalingClientRef = useRef<SignalingClient | null>(null);
   const connectionsRef = useRef<Map<string, PeerConnection>>(new Map());
-  const messageHandlerRef = useRef<
-    ((peerId: string, message: Record<string, unknown>) => void) | null
-  >(null);
+  const handlersRef = useRef<Set<MessageHandler>>(new Set());
 
   useEffect(
     function initializeSignalingClient() {
@@ -116,8 +141,22 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
           peerId,
           remotePeerId,
           signalingClient,
-          (fromPeerId, message) => {
-            messageHandlerRef.current?.(fromPeerId, message);
+          (fromPeerId, raw) => {
+            const message: Message<JSONSerializable> = {
+              senderId: fromPeerId,
+              data:
+                raw && typeof raw === 'object' && 'data' in raw && raw.data !== undefined
+                  ? (raw.data as JSONSerializable)
+                  : (raw as JSONSerializable),
+              timestamp:
+                raw &&
+                typeof raw === 'object' &&
+                'timestamp' in raw &&
+                typeof (raw as { timestamp?: number }).timestamp === 'number'
+                  ? (raw as { timestamp: number }).timestamp
+                  : Date.now(),
+            };
+            handlersRef.current.forEach((h) => void h(message));
           }
         );
 
@@ -145,9 +184,17 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     connection?.send(message);
   };
 
-  const onMessage = (handler: (peerId: string, message: Record<string, unknown>) => void) => {
-    messageHandlerRef.current = handler;
-  };
+  const onMessage = useCallback(
+    <TData extends JSONSerializable = JSONSerializable>(
+      handler: MessageHandler<TData>
+    ): (() => void) => {
+      handlersRef.current.add(handler as MessageHandler);
+      return () => {
+        handlersRef.current.delete(handler as MessageHandler);
+      };
+    },
+    []
+  );
 
   const contextValue: RoomContextValue = {
     roomId,

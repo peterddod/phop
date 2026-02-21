@@ -1,60 +1,14 @@
-import { useEffect, useState } from 'react';
-import { Room, useRoom } from 'react-p2p';
+import { useState } from 'react';
+import { Room, useRoom, useSharedState } from 'react-p2p';
 import './Peer.css';
 
-// Component that uses the P2P connection
-function PeerContent({ peerName }: { peerName: string }) {
-  const { peerId, peers, isConnected, broadcast, onMessage } = useRoom();
-  const [message, setMessage] = useState('');
-  const [messages, setMessages] = useState<
-    Array<{ from: string; text: string; timestamp: number }>
-  >([]);
+const DEFAULT_SERVER_URL = 'ws://localhost:8080';
 
-  useEffect(() => {
-    // Listen for incoming messages
-    onMessage((fromPeerId: string, data: Record<string, unknown>) => {
-      if (data.type === 'chat' && typeof data.text === 'string') {
-        const messageText = data.text as string;
-        setMessages((prev) => [
-          ...prev,
-          {
-            from: fromPeerId,
-            text: messageText,
-            timestamp: Date.now(),
-          },
-        ]);
-      }
-    });
-  }, [onMessage]);
+function PeerContent({ peerName, serverUrl, onDisconnect }: { peerName: string; serverUrl: string; onDisconnect: () => void }) {
+  const { peerId, peers, isConnected } = useRoom();
+  const [count, setCount] = useSharedState<number>('counter', 0);
 
-  const handleSendMessage = () => {
-    if (!message.trim()) return;
-
-    // Broadcast message to all peers
-    broadcast({
-      type: 'chat',
-      text: message,
-    });
-
-    // Add to own message list
-    setMessages((prev) => [
-      ...prev,
-      {
-        from: 'me',
-        text: message,
-        timestamp: Date.now(),
-      },
-    ]);
-
-    setMessage('');
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
+  const disabled = !isConnected || peers.filter((p: string) => p !== peerId).length === 0;
 
   return (
     <div className="peer-container">
@@ -68,77 +22,108 @@ function PeerContent({ peerName }: { peerName: string }) {
 
       <div className="peer-info">
         <div className="info-item">
+          <span className="info-label">Server:</span>
+          <span className="info-value">{serverUrl}</span>
+        </div>
+        <div className="info-item">
           <span className="info-label">My ID:</span>
           <span className="info-value">{peerId || 'Connecting...'}</span>
         </div>
         <div className="info-item">
           <span className="info-label">Peers:</span>
           <span className="info-value">
-            {peers.length === 0
+            {peers.filter((p: string) => p !== peerId).length === 0
               ? 'Waiting for peers...'
               : peers.filter((p: string) => p !== peerId).join(', ')}
           </span>
         </div>
       </div>
 
-      <div className="messages-container">
-        <div className="messages-header">Messages</div>
-        <div className="messages-list">
-          {messages.length === 0 ? (
-            <div className="no-messages">No messages yet. Send one to get started!</div>
-          ) : (
-            messages.map((msg, index) => (
-              <div
-                key={`${msg.timestamp}-${index}`}
-                className={`message ${msg.from === 'me' ? 'message-sent' : 'message-received'}`}
-              >
-                <div className="message-sender">
-                  {msg.from === 'me' ? 'You' : `Peer ${msg.from.slice(0, 8)}`}
-                </div>
-                <div className="message-text">{msg.text}</div>
-                <div className="message-time">{new Date(msg.timestamp).toLocaleTimeString()}</div>
-              </div>
-            ))
-          )}
+      <div className="counter-container">
+        <p className="counter-label">Shared counter</p>
+        <div className="counter-display">{count ?? 0}</div>
+        <div className="counter-controls">
+          <button
+            type="button"
+            className="counter-button"
+            onClick={() => setCount((count ?? 0) - 1)}
+            disabled={disabled}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="counter-button"
+            onClick={() => setCount((count ?? 0) + 1)}
+            disabled={disabled}
+          >
+            +
+          </button>
         </div>
+        {disabled && (
+          <p className="counter-hint">
+            {!isConnected ? 'Connecting to room...' : 'Waiting for another peer to join...'}
+          </p>
+        )}
       </div>
 
-      <div className="message-input-container">
-        <input
-          type="text"
-          className="message-input"
-          placeholder="Type a message..."
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyPress={handleKeyPress}
-          disabled={!isConnected || peers.length === 0}
-        />
-        <button
-          type="button"
-          className="send-button"
-          onClick={handleSendMessage}
-          disabled={!isConnected || peers.length === 0 || !message.trim()}
-        >
-          Send
+      <div className="disconnect-container">
+        <button type="button" className="disconnect-button" onClick={onDisconnect}>
+          Disconnect
         </button>
       </div>
     </div>
   );
 }
 
-// Main Peer component with Room provider
 export default function PeerComponent() {
-  // Get peer name from URL query parameter
   const params = new URLSearchParams(window.location.search);
   const peerName = params.get('peer') || 'Unknown';
 
-  // Use localhost:8080 for the signaling server (adjust as needed)
-  const signallingServerUrl = 'ws://localhost:8080';
-  const roomId = 'demo-room';
+  const [inputUrl, setInputUrl] = useState(DEFAULT_SERVER_URL);
+  const [serverUrl, setServerUrl] = useState<string | null>(null);
+
+  const handleConnect = (e: React.FormEvent) => {
+    e.preventDefault();
+    setServerUrl(inputUrl.trim());
+  };
+
+  if (!serverUrl) {
+    return (
+      <div className="peer-container">
+        <div className="peer-header">
+          <h2>Peer {peerName}</h2>
+        </div>
+        <form className="server-form" onSubmit={handleConnect}>
+          <label className="server-label" htmlFor="server-url">
+            Relay server address
+          </label>
+          <div className="server-input-row">
+            <input
+              id="server-url"
+              type="text"
+              className="server-input"
+              value={inputUrl}
+              onChange={(e) => setInputUrl(e.target.value)}
+              placeholder="ws://localhost:8080"
+              spellCheck={false}
+            />
+            <button type="submit" className="server-connect-button" disabled={!inputUrl.trim()}>
+              Connect
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
 
   return (
-    <Room signallingServerUrl={signallingServerUrl} roomId={roomId}>
-      <PeerContent peerName={`Peer ${peerName}`} />
+    <Room signallingServerUrl={serverUrl} roomId="demo-room">
+      <PeerContent
+        peerName={`Peer ${peerName}`}
+        serverUrl={serverUrl}
+        onDisconnect={() => setServerUrl(null)}
+      />
     </Room>
   );
 }

@@ -12,7 +12,10 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "erasableSyntaxOnly": true,
-    "noUncheckedSideEffectImports": true
+    "baseUrl": ".",
+    "paths": {
+      "react-p2p": ["../react-p2p/src/index.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -7,7 +7,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsup src/index.ts --format cjs --dts --sourcemap --clean",
-    "dev": "tsup src/index.ts --format cjs --dts --sourcemap --watch",
+    "dev": "tsup src/index.ts --format cjs --dts --sourcemap --watch --onSuccess \"node dist/index.js\"",
     "start": "node dist/index.js"
   },
   "engines": {
