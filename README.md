@@ -27,19 +27,25 @@ bun install
 
 ### Run Development
 
-Start the signaling server:
+Start everything with a single command:
 ```bash
-bun run start:server
+bun run dev
 ```
 
-In a separate terminal, run the example app:
-```bash
-bun run dev:example
-```
+This starts three processes in parallel:
+- **Example app** — http://localhost:9000
+- **Signaling server** — ws://localhost:8080
+- **Library** — watches `packages/react-p2p/src` and rebuilds on changes
 
-This provides:
-- Example app: http://localhost:9000
-- Signaling server: ws://localhost:8080
+### Try the Example
+
+1. Open http://localhost:9000 in your browser
+2. The page shows two peer iframes side by side, each with a **Connect** form pre-filled with `ws://localhost:8080`
+3. Click **Connect** in both iframes
+4. Once both peers have joined, the **+** and **−** buttons activate
+5. Clicking either button updates the shared counter in both peers in real time
+
+Both iframes run in the same browser tab but behave as independent peers — each has its own WebRTC connection via the local signaling server.
 
 ## Project Structure
 
@@ -58,9 +64,9 @@ react-p2p/
 
 | Command | Description |
 |---------|-------------|
-| `bun run dev` | Run example + server in parallel |
-| `bun run start:server` | Start the signaling server |
-| `bun run dev:server` | Build signaling server in watch mode |
+| `bun run dev` | Start everything (library, signaling server, example app) in parallel |
+| `bun run start:server` | Start the signaling server only |
+| `bun run dev:server` | Build & run signaling server in watch mode |
 | `bun run dev:example` | Run example app only |
 | `bun run build` | Build all packages |
 | `bun run build:lib` | Build library only |
@@ -103,7 +109,7 @@ Shared configuration in `tsconfig.base.json`. Each package extends this with spe
 - **[TypeScript](https://www.typescriptlang.org/)** - Type safety
 - **[React](https://react.dev/)** 19.x - UI library
 - **[Biome](https://biomejs.dev/)** - Linting & formatting
-- **[Vite](https://vite.dev/)** - Example app bundler
+- **[Farm](https://www.farmfe.org/)** - Example app bundler
 - **[tsup](https://tsup.egoist.dev/)** - Library bundler
 - **[WebSocket](https://github.com/websockets/ws)** - Signaling server
 
