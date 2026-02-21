@@ -156,7 +156,7 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
                   ? (raw as { timestamp: number }).timestamp
                   : Date.now(),
             };
-            handlersRef.current.forEach((h) => h(message));
+            handlersRef.current.forEach((h) => void h(message));
           }
         );
 
@@ -184,14 +184,17 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     connection?.send(message);
   };
 
-  const onMessage = useCallback(<TData extends JSONSerializable = JSONSerializable>(
-    handler: MessageHandler<TData>
-  ): () => void => {
-    handlersRef.current.add(handler as MessageHandler);
-    return () => {
-      handlersRef.current.delete(handler as MessageHandler);
-    };
-  }, []);
+  const onMessage = useCallback(
+    <TData extends JSONSerializable = JSONSerializable>(
+      handler: MessageHandler<TData>
+    ): (() => void) => {
+      handlersRef.current.add(handler as MessageHandler);
+      return () => {
+        handlersRef.current.delete(handler as MessageHandler);
+      };
+    },
+    []
+  );
 
   const contextValue: RoomContextValue = {
     roomId,
