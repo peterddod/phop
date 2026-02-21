@@ -15,9 +15,9 @@
     "dev:example": "bun --filter=example dev",
     "dev:lib": "bun --filter=react-p2p dev",
     "build": "bun run build --filter='./packages/*'",
-    "build:lib": "bun --filter=react-p2p build",
-    "build:server": "bun --filter=signalling-server build",
-    "build:example": "bun --filter=example build",
+    "build:lib": "bun --filter=react-p2p run build",
+    "build:server": "bun --filter=signalling-server run build",
+    "build:example": "bun --filter=example run build",
     "start:server": "bun --filter=signalling-server start",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
@@ -27,6 +27,7 @@
     "test": "echo \"No tests specified\""
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.10"
+    "@biomejs/biome": "^2.3.10",
+    "react-refresh": "^0.18.0"
   }
 }
