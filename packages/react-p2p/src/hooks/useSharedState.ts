@@ -76,9 +76,27 @@ const newestWinsStrategy: MergeStrategy<JSONSerializable, NewestWinsMeta> = {
  *
  * @param key - A string key that namespaces this shared state slice. Multiple calls with the same key share state; different keys are independent.
  * @param initialState - The initial state of the shared state (used only before any sync or update).
- * @param strategy - An optional merge strategy controlling how incoming state is reconciled. Defaults to newest-wins (by timestamp).
  * @returns A tuple containing the current state and a function to update the state.
  */
+export function useSharedState<TState extends JSONSerializable>(
+  key: string,
+  initialState: TState | null
+): [state: TState | null, setState: (next: TState | null) => void];
+
+/**
+ * A hook that allows you to share state between multiple peers with a custom merge strategy.
+ *
+ * @param key - A string key that namespaces this shared state slice.
+ * @param initialState - The initial state (used only before any sync or update).
+ * @param strategy - A merge strategy controlling how incoming state is reconciled.
+ * @returns A tuple containing the current state and a function to update the state.
+ */
+export function useSharedState<TState extends JSONSerializable, TMeta extends MergeMeta>(
+  key: string,
+  initialState: TState | null,
+  strategy: MergeStrategy<TState, TMeta>
+): [state: TState | null, setState: (next: TState | null) => void];
+
 export function useSharedState<
   TState extends JSONSerializable,
   TMeta extends MergeMeta = NewestWinsMeta,
@@ -94,9 +112,15 @@ export function useSharedState<
   const rawStateRef = useRef<TState | null>(initialState);
   const rawStateMetaRef = useRef<TMeta>(strategy.initialMeta);
 
+  const strategyRef = useRef(strategy);
+
   const { broadcast, onMessage, onPeerConnected, peerId, sendToPeer } = useRoom();
 
   rawStateRef.current = rawState;
+
+  useEffect(() => {
+    strategyRef.current = strategy;
+  }, [strategy]);
 
   useEffect(
     function handleMessage() {
@@ -117,7 +141,7 @@ export function useSharedState<
 
           if (data.key !== key) return;
 
-          const result = strategy.merge(
+          const result = strategyRef.current.merge(
             rawStateRef.current,
             rawStateMetaRef.current,
             data.state,
@@ -133,7 +157,7 @@ export function useSharedState<
       );
       return unsubscribe;
     },
-    [key, onMessage, peerId, sendToPeer, strategy]
+    [key, onMessage, peerId, sendToPeer]
   );
 
   useEffect(
@@ -152,7 +176,7 @@ export function useSharedState<
 
   const setState = useCallback(
     (next: TState | null): void => {
-      const meta = strategy.createMeta();
+      const meta = strategyRef.current.createMeta();
       rawStateRef.current = next;
       rawStateMetaRef.current = meta;
       setRawState(next);
@@ -162,7 +186,7 @@ export function useSharedState<
         timestamp: Date.now(),
       });
     },
-    [broadcast, key, peerId, strategy]
+    [broadcast, key, peerId]
   );
 
   return [rawState, setState];
