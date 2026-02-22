@@ -75,7 +75,7 @@ export function createLamportStrategy(
   let localClock = 0;
 
   return {
-    initialMeta: { clock: 0, tiebreaker: '' },
+    initialMeta: { clock: 0, tiebreaker: getPeerId() },
 
     createMeta(): LamportMeta {
       return { clock: ++localClock, tiebreaker: getPeerId() };
@@ -85,16 +85,18 @@ export function createLamportStrategy(
       _currentState,
       currentMeta,
       incomingState,
-      incomingMeta
+      incomingMeta,
+      senderId
     ): { state: JSONSerializable | null; meta: LamportMeta } | null {
-      // Advance local clock on every receive (Lamport rule).
       localClock = Math.max(localClock, incomingMeta.clock);
 
       const clockWins = incomingMeta.clock > currentMeta.clock;
-      // Deterministic tiebreak: higher peer ID wins so all peers agree.
+      const incomingTiebreaker = incomingMeta.tiebreaker || senderId;
+      const currentTiebreaker = currentMeta.tiebreaker || getPeerId();
+
       const tiebreakWins =
         incomingMeta.clock === currentMeta.clock &&
-        incomingMeta.tiebreaker > currentMeta.tiebreaker;
+        incomingTiebreaker > currentTiebreaker;
 
       return clockWins || tiebreakWins
         ? { state: incomingState, meta: incomingMeta }
