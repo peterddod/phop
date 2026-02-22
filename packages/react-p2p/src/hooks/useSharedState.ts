@@ -46,33 +46,74 @@ function isStateRequest(
   );
 }
 
-type NewestWinsMeta = { timestamp: number };
+/**
+ * Metadata carried by the Lamport clock strategy.
+ * `clock` is a monotonically increasing logical counter; `tiebreaker` is the
+ * writing peer's ID, used to deterministically resolve equal-clock conflicts.
+ */
+export type LamportMeta = { clock: number; tiebreaker: string };
 
-const newestWinsStrategy: MergeStrategy<JSONSerializable, NewestWinsMeta> = {
-  initialMeta: { timestamp: 0 },
-  createMeta(): NewestWinsMeta {
-    return { timestamp: Date.now() };
-  },
-  merge(
-    _currentState,
-    currentMeta,
-    incomingState,
-    incomingMeta
-  ): { state: JSONSerializable | null; meta: NewestWinsMeta } | null {
-    return incomingMeta.timestamp > currentMeta.timestamp
-      ? { state: incomingState, meta: incomingMeta }
-      : null;
-  },
-};
+/**
+ * Creates a Lamport logical-clock merge strategy.
+ *
+ * Unlike wall-clock timestamps, Lamport clocks do not rely on peers having
+ * synchronised system clocks. The clock advances monotonically: it increments
+ * on every local write and is fast-forwarded to `max(local, incoming)` on
+ * every receive, so causal ordering is preserved across all peers.
+ *
+ * Concurrent writes (same clock value) are broken deterministically by
+ * comparing the writing peer's ID as a string, so every peer reaches the same
+ * result independently.
+ *
+ * @param getPeerId - A function that returns the local peer's ID at call time.
+ *   Pass a ref-backed getter so the strategy stays stable even before the
+ *   signalling handshake completes.
+ */
+export function createLamportStrategy(
+  getPeerId: () => string
+): MergeStrategy<JSONSerializable, LamportMeta> {
+  let localClock = 0;
+
+  return {
+    initialMeta: { clock: 0, tiebreaker: getPeerId() },
+
+    createMeta(): LamportMeta {
+      return { clock: ++localClock, tiebreaker: getPeerId() };
+    },
+
+    merge(
+      _currentState,
+      currentMeta,
+      incomingState,
+      incomingMeta,
+      senderId
+    ): { state: JSONSerializable | null; meta: LamportMeta } | null {
+      localClock = Math.max(localClock, incomingMeta.clock);
+
+      const clockWins = incomingMeta.clock > currentMeta.clock;
+      const incomingTiebreaker = incomingMeta.tiebreaker || senderId;
+      const currentTiebreaker = currentMeta.tiebreaker || getPeerId();
+
+      const tiebreakWins =
+        incomingMeta.clock === currentMeta.clock &&
+        incomingTiebreaker > currentTiebreaker;
+
+      return clockWins || tiebreakWins
+        ? { state: incomingState, meta: { ...incomingMeta, tiebreaker: incomingTiebreaker } }
+        : null;
+    },
+  };
+}
 
 /**
  * A hook that allows you to share state between multiple peers.
  *
  * Works hostlessly by:
  *
- * - Broadcasting updates to all peers under the given key; everyone keeps the latest timestamped state.
- * - Late joiners: when a data channel opens to a new peer, both sides push their current state to
- *   each other; the merge strategy (newest-wins by default) keeps the most recent value.
+ * - Broadcasting updates to all peers under the given key; everyone keeps the
+ *   causally latest state according to a Lamport logical clock.
+ * - Late joiners: when a data channel opens to a new peer, both sides push
+ *   their current state to each other; the merge strategy keeps the winner.
  *
  * @param key - A string key that namespaces this shared state slice. Multiple calls with the same key share state; different keys are independent.
  * @param initialState - The initial state of the shared state (used only before any sync or update).
@@ -99,29 +140,37 @@ export function useSharedState<TState extends JSONSerializable, TMeta extends Me
 
 export function useSharedState<
   TState extends JSONSerializable,
-  TMeta extends MergeMeta = NewestWinsMeta,
+  TMeta extends MergeMeta = LamportMeta,
 >(
   key: string,
   initialState: TState | null,
-  strategy: MergeStrategy<TState, TMeta> = newestWinsStrategy as unknown as MergeStrategy<
-    TState,
-    TMeta
-  >
+  strategy?: MergeStrategy<TState, TMeta>
 ): [state: TState | null, setState: (next: TState | null) => void] {
+  const { broadcast, onMessage, onPeerConnected, peerId, sendToPeer } = useRoom();
+
+  const peerIdRef = useRef(peerId);
+  peerIdRef.current = peerId;
+
+  const lamportStrategyRef = useRef<MergeStrategy<JSONSerializable, LamportMeta>>(
+    createLamportStrategy(() => peerIdRef.current)
+  );
+
+  const effectiveStrategy: MergeStrategy<TState, TMeta> =
+    strategy !== undefined
+      ? strategy
+      : (lamportStrategyRef.current as unknown as MergeStrategy<TState, TMeta>);
+
   const [rawState, setRawState] = useState<TState | null>(initialState);
   const rawStateRef = useRef<TState | null>(initialState);
-  const rawStateMetaRef = useRef<TMeta>(strategy.initialMeta);
+  const rawStateMetaRef = useRef<TMeta>(effectiveStrategy.initialMeta);
 
-  const strategyRef = useRef(strategy);
-
-  const { broadcast, onMessage, onPeerConnected, peerId, sendToPeer } = useRoom();
+  const strategyRef = useRef(effectiveStrategy);
 
   rawStateRef.current = rawState;
 
   useEffect(() => {
-    strategyRef.current = strategy;
-    rawStateMetaRef.current = strategy.initialMeta;
-  }, [strategy]);
+    strategyRef.current = effectiveStrategy;
+  }, [effectiveStrategy]);
 
   useEffect(
     function handleMessage() {
