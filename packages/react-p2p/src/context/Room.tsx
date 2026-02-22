@@ -37,6 +37,7 @@ export interface RoomContextValue {
   onMessage: <TData extends JSONSerializable = JSONSerializable>(
     handler: MessageHandler<TData>
   ) => () => void;
+  onPeerConnected: (handler: (remotePeerId: string) => void) => () => void;
 }
 
 export const RoomContext = createContext<RoomContextValue | null>(null);
@@ -54,6 +55,7 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
   const signalingClientRef = useRef<SignalingClient | null>(null);
   const connectionsRef = useRef<Map<string, PeerConnection>>(new Map());
   const handlersRef = useRef<Set<MessageHandler>>(new Set());
+  const peerConnectedHandlersRef = useRef<Set<(remotePeerId: string) => void>>(new Set());
 
   useEffect(
     function initializeSignalingClient() {
@@ -157,6 +159,9 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
                   : Date.now(),
             };
             handlersRef.current.forEach((h) => void h(message));
+          },
+          (connectedRemotePeerId) => {
+            peerConnectedHandlersRef.current.forEach((h) => void h(connectedRemotePeerId));
           }
         );
 
@@ -173,16 +178,16 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     [peers, peerId]
   );
 
-  const broadcast = (message: Record<string, unknown>) => {
+  const broadcast = useCallback((message: Record<string, unknown>) => {
     connectionsRef.current.forEach((connection) => {
       connection.send(message);
     });
-  };
+  }, []);
 
-  const sendToPeer = (targetPeerId: string, message: Record<string, unknown>) => {
+  const sendToPeer = useCallback((targetPeerId: string, message: Record<string, unknown>) => {
     const connection = connectionsRef.current.get(targetPeerId);
     connection?.send(message);
-  };
+  }, []);
 
   const onMessage = useCallback(
     <TData extends JSONSerializable = JSONSerializable>(
@@ -196,6 +201,13 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     []
   );
 
+  const onPeerConnected = useCallback((handler: (remotePeerId: string) => void): (() => void) => {
+    peerConnectedHandlersRef.current.add(handler);
+    return () => {
+      peerConnectedHandlersRef.current.delete(handler);
+    };
+  }, []);
+
   const contextValue: RoomContextValue = {
     roomId,
     peerId,
@@ -204,6 +216,7 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     broadcast,
     sendToPeer,
     onMessage,
+    onPeerConnected,
   };
 
   return <RoomContext.Provider value={contextValue}>{children}</RoomContext.Provider>;

@@ -4,7 +4,15 @@ import './Peer.css';
 
 const DEFAULT_SERVER_URL = 'ws://localhost:8080';
 
-function PeerContent({ peerName, serverUrl, onDisconnect }: { peerName: string; serverUrl: string; onDisconnect: () => void }) {
+function PeerContent({
+  peerName,
+  serverUrl,
+  onDisconnect,
+}: {
+  peerName: string;
+  serverUrl: string;
+  onDisconnect: () => void;
+}) {
   const { peerId, peers, isConnected } = useRoom();
   const [count, setCount] = useSharedState<number>('counter', 0);
 

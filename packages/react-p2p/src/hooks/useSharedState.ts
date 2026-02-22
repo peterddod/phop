@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRoom } from '..';
-import { JSONSerializable } from '../context/Room';
+import type { JSONSerializable } from '../context/Room';
 
 export type MergeMeta = Record<string, JSONSerializable>;
 
@@ -8,6 +8,9 @@ export interface MergeStrategy<
   TState extends JSONSerializable = JSONSerializable,
   TMeta extends MergeMeta = MergeMeta,
 > {
+  /** Initial metadata before any sync or update. */
+  initialMeta: TMeta;
+
   /** Produce meta when this peer sets state (e.g. timestamp, version). */
   createMeta(): TMeta;
 
@@ -38,12 +41,15 @@ type StateRequestPayload = {
 function isStateRequest(
   data: SharedStatePayload<JSONSerializable> | StateRequestPayload
 ): data is StateRequestPayload {
-  return typeof data === 'object' && data !== null && 'type' in data && data.type === 'state-request';
+  return (
+    typeof data === 'object' && data !== null && 'type' in data && data.type === 'state-request'
+  );
 }
 
 type NewestWinsMeta = { timestamp: number };
 
 const newestWinsStrategy: MergeStrategy<JSONSerializable, NewestWinsMeta> = {
+  initialMeta: { timestamp: 0 },
   createMeta(): NewestWinsMeta {
     return { timestamp: Date.now() };
   },
@@ -59,103 +65,104 @@ const newestWinsStrategy: MergeStrategy<JSONSerializable, NewestWinsMeta> = {
   },
 };
 
-const INITIAL_META: NewestWinsMeta = { timestamp: 0 };
-
 /**
  * A hook that allows you to share state between multiple peers.
  *
  * Works hostlessly by:
  *
  * - Broadcasting updates to all peers under the given key; everyone keeps the latest timestamped state.
- * - Late joiners: when this peer sees new peers, it requests state for this key from them; each peer
- *   replies with its current state; this peer (and the existing merge logic) keeps the one with the
- *   latest timestamp.
+ * - Late joiners: when a data channel opens to a new peer, both sides push their current state to
+ *   each other; the merge strategy (newest-wins by default) keeps the most recent value.
  *
  * @param key - A string key that namespaces this shared state slice. Multiple calls with the same key share state; different keys are independent.
  * @param initialState - The initial state of the shared state (used only before any sync or update).
+ * @param strategy - An optional merge strategy controlling how incoming state is reconciled. Defaults to newest-wins (by timestamp).
  * @returns A tuple containing the current state and a function to update the state.
  */
-export function useSharedState<TState extends JSONSerializable>(
+export function useSharedState<
+  TState extends JSONSerializable,
+  TMeta extends MergeMeta = NewestWinsMeta,
+>(
   key: string,
-  initialState: TState | null
+  initialState: TState | null,
+  strategy: MergeStrategy<TState, TMeta> = newestWinsStrategy as unknown as MergeStrategy<
+    TState,
+    TMeta
+  >
 ): [state: TState | null, setState: (next: TState | null) => void] {
   const [rawState, setRawState] = useState<TState | null>(initialState);
-  const rawStateMetaRef = useRef<NewestWinsMeta>(INITIAL_META);
-  const prevPeersRef = useRef<string[]>([]);
+  const rawStateRef = useRef<TState | null>(initialState);
+  const rawStateMetaRef = useRef<TMeta>(strategy.initialMeta);
 
-  const { broadcast, onMessage, peerId, peers, sendToPeer } = useRoom();
+  const { broadcast, onMessage, onPeerConnected, peerId, sendToPeer } = useRoom();
+
+  rawStateRef.current = rawState;
 
   useEffect(
     function handleMessage() {
-      const unsubscribe = onMessage<
-        SharedStatePayload<TState, NewestWinsMeta> | StateRequestPayload
-      >(({ senderId, data }) => {
-        if (senderId === peerId) return;
+      const unsubscribe = onMessage<SharedStatePayload<TState, TMeta> | StateRequestPayload>(
+        ({ senderId, data }) => {
+          if (senderId === peerId) return;
 
-        if (isStateRequest(data)) {
-          if (data.key === key) {
-            sendToPeer(senderId, {
-              senderId: peerId,
-              data: { key, state: rawState, meta: rawStateMetaRef.current },
-              timestamp: Date.now(),
-            });
+          if (isStateRequest(data)) {
+            if (data.key === key) {
+              sendToPeer(senderId, {
+                senderId: peerId,
+                data: { key, state: rawStateRef.current, meta: rawStateMetaRef.current },
+                timestamp: Date.now(),
+              });
+            }
+            return;
           }
-          return;
-        }
 
-        if (data.key !== key || !('state' in data) || !('meta' in data)) return;
+          if (data.key !== key) return;
 
-        const payload = data as SharedStatePayload<TState, NewestWinsMeta>;
-        const result = newestWinsStrategy.merge(
-          rawState,
-          rawStateMetaRef.current,
-          payload.state,
-          payload.meta as NewestWinsMeta,
-          senderId
-        );
-        if (result) {
-          setRawState(result.state as TState | null);
-          rawStateMetaRef.current = result.meta;
+          const result = strategy.merge(
+            rawStateRef.current,
+            rawStateMetaRef.current,
+            data.state,
+            data.meta,
+            senderId
+          );
+          if (result) {
+            rawStateRef.current = result.state;
+            rawStateMetaRef.current = result.meta;
+            setRawState(result.state);
+          }
         }
-      });
+      );
       return unsubscribe;
     },
-    [key, onMessage, peerId, rawState, sendToPeer]
+    [key, onMessage, peerId, sendToPeer, strategy]
   );
 
   useEffect(
-    function requestStateFromNewPeers() {
-      const others = peers.filter((p) => p !== peerId);
-      const prevOthers = prevPeersRef.current.filter((p) => p !== peerId);
-      const newPeers = others.filter((p) => !prevOthers.includes(p));
-      prevPeersRef.current = peers;
-
-      if (newPeers.length === 0) return;
-
-      const payload: StateRequestPayload = { type: 'state-request', key };
-      newPeers.forEach((targetId) => {
-        sendToPeer(targetId, {
+    function pushStateOnConnect() {
+      const unsubscribe = onPeerConnected((remotePeerId) => {
+        sendToPeer(remotePeerId, {
           senderId: peerId,
-          data: payload,
+          data: { key, state: rawStateRef.current, meta: rawStateMetaRef.current },
           timestamp: Date.now(),
         });
       });
+      return unsubscribe;
     },
-    [key, peerId, peers, sendToPeer]
+    [key, onPeerConnected, peerId, sendToPeer]
   );
 
   const setState = useCallback(
     (next: TState | null): void => {
-      const meta = newestWinsStrategy.createMeta();
+      const meta = strategy.createMeta();
+      rawStateRef.current = next;
       rawStateMetaRef.current = meta;
       setRawState(next);
-      broadcast<SharedStatePayload<TState, NewestWinsMeta>>({
+      broadcast<SharedStatePayload<TState, TMeta>>({
         senderId: peerId,
         data: { key, state: next, meta },
-        timestamp: meta.timestamp,
+        timestamp: Date.now(),
       });
     },
-    [broadcast, key, peerId]
+    [broadcast, key, peerId, strategy]
   );
 
   return [rawState, setState];

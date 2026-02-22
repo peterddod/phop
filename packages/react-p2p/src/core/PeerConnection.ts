@@ -15,7 +15,8 @@ class PeerConnection {
     private selfPeerId: string,
     private remotePeerId: string,
     private signalingClient: SignalingClient,
-    private onMessage?: (peerId: string, message: Record<string, unknown>) => void
+    private onMessage?: (peerId: string, message: Record<string, unknown>) => void,
+    private onChannelOpen?: (remotePeerId: string) => void
   ) {
     this.pc = new RTCPeerConnection({
       iceServers: PeerConnection.DEFAULT_ICE_SERVERS,
@@ -100,6 +101,7 @@ class PeerConnection {
   private setupDataChannel(channel: RTCDataChannel) {
     channel.onopen = () => {
       console.log(`Data channel open to ${this.remotePeerId}`);
+      this.onChannelOpen?.(this.remotePeerId);
     };
 
     channel.onclose = () => {
