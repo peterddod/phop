@@ -8,7 +8,6 @@
   "workspaces": [
     "packages/*"
   ],
-  "packageManager": "bun@1.1.25",
   "scripts": {
     "dev": "bun run --parallel dev:server dev:example dev:lib",
     "dev:server": "bun --filter=signalling-server dev",
