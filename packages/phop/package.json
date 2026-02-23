@@ -1,7 +1,7 @@
 {
-  "name": "react-p2p",
+  "name": "phop",
   "version": "0.1.0",
-  "description": "React P2P is a state-management library for React that allows you to manage the state of your application in a decentralised way.",
+  "description": "Peer-to-peer state management for React using WebRTC. Share and sync state across browsers in real time — no backend required.",
   "keywords": [
     "react",
     "p2p",
@@ -12,11 +12,11 @@
   "author": "Peter Dodd",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/peterddod/react-p2p.git"
+    "url": "git+https://github.com/peterddod/phop.git"
   },
-  "homepage": "https://github.com/peterddod/react-p2p#readme",
+  "homepage": "https://github.com/peterddod/phop#readme",
   "bugs": {
-    "url": "https://github.com/peterddod/react-p2p/issues"
+    "url": "https://github.com/peterddod/phop/issues"
   },
   "main": "dist/index.js",
   "module": "dist/index.mjs",

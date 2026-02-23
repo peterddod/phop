@@ -1,113 +1,73 @@
-# Signalling Server
+# phop signalling server
 
-A WebSocket-based signaling server for coordinating WebRTC peer-to-peer connections.
+A lightweight WebSocket signaling server that coordinates the initial WebRTC handshake between phop peers. Once browsers are connected, all state sync flows directly between them — the signaling server is only needed to get the connection started.
 
-## Features
-
-- Room-based peer organization
-- Message relaying between peers in the same room
-- Automatic peer discovery
-- Connection/disconnection notifications
-- Runs on port 8080 by default
-
-## Development
-
-Build the server in watch mode (rebuilds on changes):
+## Self-hosting with Docker
 
 ```bash
-bun run dev
+docker run -p 8080:8080 ghcr.io/peterddod/react-p2p/signalling-server:latest
 ```
 
-To actually run the server after building:
+Pin to a specific version to match your phop client version:
 
 ```bash
-bun run start
+docker run -p 8080:8080 ghcr.io/peterddod/react-p2p/signalling-server:1.0.0
 ```
 
-Server will be available at `ws://localhost:8080`
-
-## Production
-
-Build and run the server:
+Set a custom port:
 
 ```bash
-bun run build
-bun run start
+docker run -e PORT=3000 -p 3000:3000 ghcr.io/peterddod/react-p2p/signalling-server:latest
 ```
 
-Set a custom port via environment variable:
+## Running from source
 
 ```bash
-PORT=3000 bun run start
+# Install dependencies from monorepo root
+bun install
+
+# Build and start
+bun run build:server
+bun run start:server
+
+# Or in watch mode during development
+bun run dev:server
 ```
+
+Server listens on `ws://localhost:8080` by default.
 
 ## Protocol
 
-### Client → Server Messages
+### Client → Server
 
-#### Join a Room
+#### Join a room
 ```json
-{
-  "type": "join",
-  "roomId": "room-name",
-  "peerId": "unique-peer-id"
-}
+{ "type": "join", "roomId": "room-name", "peerId": "unique-peer-id" }
 ```
 
-#### Send Signal to Peer
+#### Send signal to peer
 ```json
-{
-  "type": "signal",
-  "to": "target-peer-id",
-  "from": "sender-peer-id",
-  "signal": { /* WebRTC signaling data */ }
-}
+{ "type": "signal", "to": "target-peer-id", "from": "sender-peer-id", "signal": {} }
 ```
 
-### Server → Client Messages
+### Server → Client
 
-#### Peers List (sent on join)
+#### Peers list (on join)
 ```json
-{
-  "type": "peers",
-  "peers": ["peer-id-1", "peer-id-2"]
-}
+{ "type": "peers", "peers": ["peer-id-1", "peer-id-2"] }
 ```
 
-#### Peer Joined
+#### Peer joined / left
 ```json
-{
-  "type": "peer-joined",
-  "peerId": "new-peer-id"
-}
+{ "type": "peer-joined", "peerId": "new-peer-id" }
+{ "type": "peer-left", "peerId": "departed-peer-id" }
 ```
 
-#### Peer Left
+#### Relayed signal
 ```json
-{
-  "type": "peer-left",
-  "peerId": "departed-peer-id"
-}
+{ "type": "signal", "from": "sender-peer-id", "signal": {} }
 ```
-
-#### Signal from Peer
-```json
-{
-  "type": "signal",
-  "from": "sender-peer-id",
-  "signal": { /* WebRTC signaling data */ }
-}
-```
-
-## Architecture
-
-- Each WebSocket connection represents a peer
-- Peers are organized into rooms by `roomId`
-- Server relays messages between peers in the same room
-- Automatic cleanup of empty rooms
-- Connection state logged to console
 
 ## License
 
-MIT
-
+MIT © [Peter Dodd](https://github.com/peterddod)

@@ -1,117 +1,75 @@
-# React P2P
+# phop
 
-> ⚠️ **Early Development** - Core P2P features are under active development
+Peer-to-peer state management for React using WebRTC. Share and sync state across browsers in real time — no backend required.
 
-A peer-to-peer state management library for React applications.
+> ⚠️ **Early Development** — Core P2P features are under active development
 
-## Overview
+## What is phop?
 
-React P2P is a monorepo containing:
-- A React state management library designed for peer-to-peer synchronization
-- A WebSocket signaling server for coordinating WebRTC connections
-- Example applications demonstrating usage
+phop lets React apps share state directly between browsers using WebRTC data channels. A lightweight signaling server handles the initial handshake; after that, state flows peer-to-peer with no server in the middle.
 
-Currently implements local state management with P2P synchronization in development.
+```tsx
+import { Room, useSharedState } from 'phop';
+
+function Counter() {
+  const [count, setCount] = useSharedState('count', 0);
+  return <button onClick={() => setCount(count + 1)}>Count: {count}</button>;
+}
+```
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| [`phop`](packages/phop) | React library — `npm install phop` |
+| [`signalling-server`](packages/signalling-server) | WebSocket server for coordinating WebRTC connections |
+| `example` | Demo app showing two peers syncing state in real time |
 
 ## Quick Start
 
 ### Prerequisites
-- [Bun](https://bun.sh) 1.1.25 or later
 
-### Installation
+- [Bun](https://bun.sh) 1.1.25+
+
+### Run locally
+
 ```bash
 git clone https://github.com/peterddod/react-p2p.git
 cd react-p2p
 bun install
-```
-
-### Run Development
-
-Start everything with a single command:
-```bash
 bun run dev
 ```
 
 This starts three processes in parallel:
+
 - **Example app** — http://localhost:9000
 - **Signaling server** — ws://localhost:8080
-- **Library** — watches `packages/react-p2p/src` and rebuilds on changes
+- **Library** — watches `packages/phop/src` and rebuilds on changes
 
-### Try the Example
-
-1. Open http://localhost:9000 in your browser
-2. The page shows two peer iframes side by side, each with a **Connect** form pre-filled with `ws://localhost:8080`
-3. Click **Connect** in both iframes
-4. Once both peers have joined, the **+** and **−** buttons activate
-5. Clicking either button updates the shared counter in both peers in real time
-
-Both iframes run in the same browser tab but behave as independent peers — each has its own WebRTC connection via the local signaling server.
-
-## Project Structure
-
-```
-react-p2p/
-├── packages/
-│   ├── react-p2p/           # Core library
-│   ├── signalling-server/   # WebSocket signaling server
-│   └── example/             # Demo application
-├── biome.json               # Linting & formatting config
-├── tsconfig.base.json       # Shared TypeScript config
-└── package.json             # Workspace root
-```
+Open http://localhost:9000 to see two peer iframes syncing a shared counter in real time.
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `bun run dev` | Start everything (library, signaling server, example app) in parallel |
-| `bun run start:server` | Start the signaling server only |
-| `bun run dev:server` | Build & run signaling server in watch mode |
-| `bun run dev:example` | Run example app only |
+| `bun run dev` | Start everything in parallel |
 | `bun run build` | Build all packages |
-| `bun run build:lib` | Build library only |
-| `bun run build:server` | Build server only |
-| `bun run build:example` | Build example only |
-| `bun run check` | Lint & format all code |
+| `bun run build:lib` | Build phop library only |
+| `bun run build:server` | Build signaling server only |
 | `bun run lint` | Check for linting issues |
+| `bun run check` | Lint and format all code |
 
 ## Contributing
-
-### Development Setup
 
 1. Fork and clone the repository
 2. Install dependencies: `bun install`
 3. Create a branch: `git checkout -b feature/my-feature`
-4. Make your changes
-5. Run linting: `bun run check`
-6. Commit with [conventional commits](https://www.conventionalcommits.org/):
-   - `feat:` - New features
-   - `fix:` - Bug fixes
-   - `chore:` - Tooling/maintenance
-   - `docs:` - Documentation
-7. Push and open a PR
-
-### Code Quality
-
-This project uses [Biome](https://biomejs.dev) for linting and formatting.
-
-- Format on save is configured in `.vscode/settings.json`
-- Run `bun run check` before committing
-- Install the recommended Biome extension for VS Code
-
-### TypeScript
-
-Shared configuration in `tsconfig.base.json`. Each package extends this with specific needs.
-
-## Technology Stack
-
-- **[Bun](https://bun.sh)** - Package manager & runtime
-- **[TypeScript](https://www.typescriptlang.org/)** - Type safety
-- **[React](https://react.dev/)** 19.x - UI library
-- **[Biome](https://biomejs.dev/)** - Linting & formatting
-- **[Farm](https://www.farmfe.org/)** - Example app bundler
-- **[tsup](https://tsup.egoist.dev/)** - Library bundler
-- **[WebSocket](https://github.com/websockets/ws)** - Signaling server
+4. Commit using [conventional commits](https://www.conventionalcommits.org/):
+   - `feat:` — new feature (triggers minor release)
+   - `fix:` — bug fix (triggers patch release)
+   - `feat!:` / `BREAKING CHANGE:` — breaking change (triggers major release)
+   - `chore:`, `docs:`, `ci:` — no release
+5. Open a PR — releases to npm and GHCR happen automatically on merge to `main`
 
 ## License
 

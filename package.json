@@ -1,8 +1,8 @@
 {
-  "name": "react-p2p-monorepo",
+  "name": "phop-monorepo",
   "version": "0.1.0",
   "private": true,
-  "description": "P2P state management for React - monorepo",
+  "description": "phop monorepo — peer-to-peer state management for React",
   "license": "MIT",
   "author": "Peter Dodd",
   "workspaces": [
@@ -12,9 +12,9 @@
     "dev": "bun run --parallel dev:server dev:example dev:lib",
     "dev:server": "bun --filter=signalling-server dev",
     "dev:example": "bun --filter=example dev",
-    "dev:lib": "bun --filter=react-p2p dev",
+    "dev:lib": "bun --filter=phop dev",
     "build": "bun run build --filter='./packages/*'",
-    "build:lib": "bun --filter=react-p2p run build",
+    "build:lib": "bun --filter=phop run build",
     "build:server": "bun --filter=signalling-server run build",
     "build:example": "bun --filter=example run build",
     "start:server": "bun --filter=signalling-server start",

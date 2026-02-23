@@ -1,5 +1,5 @@
+import { Room, useRoom, useSharedState } from 'phop';
 import { useState } from 'react';
-import { Room, useRoom, useSharedState } from 'react-p2p';
 import './Peer.css';
 
 const DEFAULT_SERVER_URL = 'ws://localhost:8080';
