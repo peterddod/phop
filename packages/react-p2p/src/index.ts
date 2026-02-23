@@ -1,5 +1,4 @@
-// Export Room context and hook
-export { Room, RoomContext, type RoomContextValue } from './context/Room';
+export { Room, RoomContext, type RoomContextValue } from './context';
 export {
   createLamportStrategy,
   createLastWriteWinsStrategy,
@@ -8,5 +7,5 @@ export {
   type MergeMeta,
   type MergeStrategy,
 } from './core/merge-strategies';
-export { useRoom } from './hooks/useRoom';
-export { useSharedState } from './hooks/useSharedState';
+export { useRoom, useSharedState } from './hooks';
+export type { JSONSerializable, Message, MessageHandler } from './types';

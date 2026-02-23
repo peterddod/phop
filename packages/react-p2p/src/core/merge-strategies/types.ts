@@ -1,4 +1,4 @@
-import type { JSONSerializable } from '../../context/Room';
+import type { JSONSerializable } from '../../types';
 
 export type MergeMeta = Record<string, JSONSerializable>;
 

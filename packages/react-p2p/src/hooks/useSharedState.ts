@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useRoom } from '..';
-import type { JSONSerializable } from '../context/Room';
 import {
   createLamportStrategy,
   type LamportMeta,
   type MergeMeta,
   type MergeStrategy,
 } from '../core/merge-strategies';
+import type { JSONSerializable } from '../types';
+import { useRoom } from './useRoom';
 
 type SharedStatePayload<TState extends JSONSerializable, TMeta extends MergeMeta = MergeMeta> = {
   key: string;

@@ -1,4 +1,4 @@
-import type { JSONSerializable } from '../../context/Room';
+import type { JSONSerializable } from '../../types';
 import type { MergeStrategy } from './types';
 
 /**

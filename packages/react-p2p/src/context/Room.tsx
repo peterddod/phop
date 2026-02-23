@@ -1,28 +1,7 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import { PeerConnection } from '../core/PeerConnection';
 import { SignalingClient } from '../core/SignalingClient';
-
-export type JSONSerializable =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | JSONSerializable[]
-  | { [key: string]: JSONSerializable };
-
-export type MessageHandler<TData extends JSONSerializable = JSONSerializable> = (
-  message: Message<TData>
-) => void;
-
-export type Message<TData extends JSONSerializable = JSONSerializable> = {
-  /** The peer ID of the sender */
-  senderId: string;
-  /** The data of the message */
-  data: TData;
-  /** The timestamp of when the message was sent */
-  timestamp: number;
-};
+import type { JSONSerializable, Message, MessageHandler } from '../types';
 
 export interface RoomContextValue {
   roomId: string;
