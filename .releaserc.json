@@ -10,16 +10,10 @@
       }
     ],
     [
-      "@semantic-release/npm",
-      {
-        "pkgRoot": "packages/phop"
-      }
-    ],
-    [
       "@semantic-release/exec",
       {
         "prepareCmd": "node scripts/bump-version.mjs ${nextRelease.version}",
-        "publishCmd": "echo ${nextRelease.version} > .release-version"
+        "publishCmd": "echo //registry.npmjs.org/:_authToken=$NPM_TOKEN >> ~/.npmrc && cd packages/phop && npm publish --access public && cd ../.. && echo ${nextRelease.version} > .release-version"
       }
     ],
     "@semantic-release/github",

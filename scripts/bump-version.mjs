@@ -7,8 +7,14 @@ if (!version) {
   process.exit(1);
 }
 
-const path = 'packages/signalling-server/package.json';
-const pkg = JSON.parse(readFileSync(path, 'utf8'));
-pkg.version = version;
-writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
-console.log(`Bumped signalling-server to ${version}`);
+const paths = [
+  'packages/phop/package.json',
+  'packages/signalling-server/package.json',
+];
+
+for (const path of paths) {
+  const pkg = JSON.parse(readFileSync(path, 'utf8'));
+  pkg.version = version;
+  writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
+  console.log(`Bumped ${path} to ${version}`);
+}
