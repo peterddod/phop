@@ -1,6 +1,6 @@
 {
   "name": "phop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Peer-to-peer state management for React using WebRTC. Share and sync state across browsers in real time — no backend required.",
   "keywords": [
     "react",
