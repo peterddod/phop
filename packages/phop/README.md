@@ -7,7 +7,7 @@ Peer-to-peer state management for React using WebRTC. Share and sync state acros
 ## Installation
 
 ```bash
-npm install phop
+npm install @peterddod/phop
 ```
 
 ## Usage
@@ -15,7 +15,7 @@ npm install phop
 Wrap your app in a `<Room>` provider and connect to a signaling server:
 
 ```tsx
-import { Room, useRoom, useSharedState } from 'phop';
+import { Room, useRoom, useSharedState } from '@peterddod/phop';
 
 function App() {
   return (

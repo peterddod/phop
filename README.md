@@ -9,7 +9,7 @@ Peer-to-peer state management for React using WebRTC. Share and sync state acros
 phop lets React apps share state directly between browsers using WebRTC data channels. A lightweight signaling server handles the initial handshake; after that, state flows peer-to-peer with no server in the middle.
 
 ```tsx
-import { useSharedState } from 'phop';
+import { useSharedState } from '@peterddod/phop';
 
 function Counter() {
   const [count, setCount] = useSharedState('count', 0);
@@ -21,7 +21,7 @@ function Counter() {
 
 | Package | Description |
 |---------|-------------|
-| [`phop`](packages/phop) | React library — `npm install phop` |
+| [`@peterddod/phop`](packages/phop) | React library — `npm install @peterddod/phop` |
 | [`signalling-server`](packages/signalling-server) | WebSocket server for coordinating WebRTC connections |
 | `example` | Demo app showing two peers syncing state in real time |
 

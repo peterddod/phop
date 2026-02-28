@@ -1,4 +1,4 @@
-import { Room, useRoom, useSharedState } from 'phop';
+import { Room, useRoom, useSharedState } from '@peterddod/phop';
 import { useState } from 'react';
 import './Peer.css';
 
