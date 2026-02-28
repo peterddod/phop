@@ -1,7 +1,7 @@
 .git
 .github
 node_modules
-packages/react-p2p
+packages/phop
 packages/example
 packages/signalling-server/dist
 packages/signalling-server/node_modules

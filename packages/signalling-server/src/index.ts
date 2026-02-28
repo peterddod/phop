@@ -1,4 +1,5 @@
 // server.ts
+import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 
 interface Client {
@@ -7,7 +8,19 @@ interface Client {
   roomId: string;
 }
 
-const wss = new WebSocketServer({ port: 8080 });
+const PORT = Number(process.env.PORT) || 8080;
+
+const server = createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', connections: clients.size }));
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ server });
 
 // Track all connected clients
 const clients = new Map<string, Client>();
@@ -143,4 +156,6 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-console.log('Signaling server running on ws://localhost:8080');
+server.listen(PORT, () => {
+  console.log(`Signaling server running on ws://localhost:${PORT}`);
+});
