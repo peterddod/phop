@@ -13,7 +13,7 @@
       "@semantic-release/exec",
       {
         "prepareCmd": "node scripts/bump-version.mjs ${nextRelease.version}",
-        "publishCmd": "echo //registry.npmjs.org/:_authToken=$NPM_TOKEN >> ~/.npmrc && cd packages/phop && npm publish --access public && cd ../.. && echo ${nextRelease.version} > .release-version",
+        "publishCmd": "cd packages/phop && npm publish --access public && cd ../.. && echo ${nextRelease.version} > .release-version",
         "successCmd": "git add CHANGELOG.md packages/phop/package.json packages/signalling-server/package.json && git commit -m \"chore(release): ${nextRelease.version} [skip ci]\" && git push origin HEAD:main"
       }
     ],
