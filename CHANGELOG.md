@@ -1,3 +1,10 @@
+## [1.1.9](https://github.com/peterddod/phop/compare/v1.1.8...v1.1.9) (2026-03-01)
+
+
+### Bug Fixes
+
+* **release:** replace manual git push with @semantic-release/git plugin ([10aea19](https://github.com/peterddod/phop/commit/10aea19c19b1cb41cac1a40b808de6c294844efa))
+
 # 1.0.0 (2026-02-24)
 
 
