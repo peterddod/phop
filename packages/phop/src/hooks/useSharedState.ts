@@ -30,9 +30,9 @@ function isStateRequest(data: unknown): data is StateRequestPayload {
 }
 
 function isSharedStatePayload(data: unknown): data is SharedStatePayload {
-  return (
-    typeof data === 'object' && data !== null && 'key' in data && 'state' in data && 'meta' in data
-  );
+  if (typeof data !== 'object' || data === null) return false;
+  const d = data as Record<string, unknown>;
+  return typeof d.key === 'string' && 'state' in d && typeof d.meta === 'object' && d.meta !== null;
 }
 
 /**
