@@ -119,14 +119,16 @@ export function useSharedState<
   // Handlers registered by the strategy via ctx.onPeersChanged.
   const peersChangedHandlersRef = useRef<Set<(peers: string[]) => void>>(new Set());
 
-  // Fire onPeersChanged handlers when the peers array reference changes.
+  // Fire onPeersChanged handlers after render when the peers array reference changes.
   const prevPeersRef = useRef<string[]>(peers);
-  if (prevPeersRef.current !== peers) {
-    prevPeersRef.current = peers;
-    for (const handler of peersChangedHandlersRef.current) {
-      handler(peers);
+  useEffect(() => {
+    if (prevPeersRef.current !== peers) {
+      prevPeersRef.current = peers;
+      for (const handler of peersChangedHandlersRef.current) {
+        handler(peers);
+      }
     }
-  }
+  }, [peers]);
 
   useEffect(
     function connectStrategy() {
@@ -142,17 +144,25 @@ export function useSharedState<
         getMeta: () => rawStateMetaRef.current,
 
         broadcast: (data) => {
+          if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+            throw new Error('ctx.broadcast: data must be a plain object');
+          }
           broadcastRef.current({
             senderId: peerIdRef.current,
-            data: { key, ...(data as object) } as JSONSerializable,
+            // key is spread last so strategy payloads cannot overwrite the namespace.
+            data: { ...(data as Record<string, JSONSerializable>), key },
             timestamp: Date.now(),
           });
         },
 
         sendToPeer: (targetPeerId, data) => {
+          if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+            throw new Error('ctx.sendToPeer: data must be a plain object');
+          }
           sendToPeerRef.current(targetPeerId, {
             senderId: peerIdRef.current,
-            data: { key, ...(data as object) } as JSONSerializable,
+            // key is spread last so strategy payloads cannot overwrite the namespace.
+            data: { ...(data as Record<string, JSONSerializable>), key },
             timestamp: Date.now(),
           });
         },
