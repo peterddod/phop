@@ -1,3 +1,10 @@
+## [1.1.16](https://github.com/peterddod/phop/compare/v1.1.15...v1.1.16) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** switch npm publish auth to NPM_TOKEN instead of trusted publisher ([8dbeb6d](https://github.com/peterddod/phop/commit/8dbeb6d114236529792b88dc28547f55dca161e3))
+
 ## [1.1.15](https://github.com/peterddod/phop/compare/v1.1.14...v1.1.15) (2026-03-01)
 
 

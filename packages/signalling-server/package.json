@@ -1,6 +1,6 @@
 {
   "name": "signalling-server",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "description": "WebRTC signalling server for react-p2p",
   "license": "MIT",
   "author": "Peter Dodd",
