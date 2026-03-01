@@ -137,6 +137,19 @@ interface Round<TState extends JSONSerializable> {
 // Strategy factory
 // ---------------------------------------------------------------------------
 
+export interface ConsensusOptions<TState extends JSONSerializable> {
+  /**
+   * Maximum number of times the protocol will retry a round after hash
+   * mismatches before giving up. Defaults to `Infinity` (retry forever).
+   */
+  maxRetries?: number;
+  /**
+   * Called when the retry limit is exceeded. Receives the last merged state
+   * that was proposed before the round was aborted.
+   */
+  onMaxRetriesExceeded?: (lastState: TState | null) => void;
+}
+
 /**
  * Creates a consensus merge strategy.
  *
@@ -152,10 +165,20 @@ interface Round<TState extends JSONSerializable> {
  *    full proposed state so peers can co-merge.
  * 4. **Hash** — each peer applies the co-merge, hashes the result, and
  *    broadcasts the hash. When all hashes match the new state is committed.
- *    If hashes diverge the round is aborted and retried.
+ *    If hashes diverge the round is aborted and retried up to `maxRetries`
+ *    times (default: unlimited). If the limit is reached, `onMaxRetriesExceeded`
+ *    is called and the round is abandoned.
  *
- * If a new local write arrives while a round is in progress it is queued and
- * becomes the proposed state for the next round.
+ * If a new local write arrives while a round is in progress it is queued; only
+ * the **most recent** queued write is retained — earlier writes in the same
+ * round are silently superseded. The retained write becomes the proposal for
+ * the next round.
+ *
+ * If a peer disconnects mid-round its entry is removed from `round.peers`,
+ * `round.proposals`, `round.readyFrom`, `round.diffs`, and `round.hashes`.
+ * The phase-completion checks are then re-evaluated against the updated peer
+ * set so the round can proceed without the departed peer. If the departed peer
+ * was the only remaining participant the round is aborted.
  *
  * Late joiners receive the committed state via the normal `onPeerConnected`
  * push and are excluded from any in-progress round.
@@ -164,19 +187,30 @@ interface Round<TState extends JSONSerializable> {
  * @param mergeFn - Optional co-merge function. Receives all proposed states
  *   with their peer IDs and returns the merged result. Defaults to a
  *   deterministic last-write-wins by peer ID ordering.
+ * @param options - Optional configuration (retry limit, abort callback).
  */
 export function createConsensusStrategy<TState extends JSONSerializable>(
   getPeerId: () => string,
-  mergeFn?: MergeFn<TState>
+  mergeFn?: MergeFn<TState>,
+  options?: ConsensusOptions<TState>
 ): MergeStrategy<TState, ConsensusMeta> {
   const merge = mergeFn ?? defaultMerge<TState>;
+  const maxRetries = options?.maxRetries ?? Infinity;
+  const onMaxRetriesExceeded = options?.onMaxRetriesExceeded;
   let roundIndex = 0;
   let activeRound: Round<TState> | null = null;
-  // Local state written while a round is in progress — replayed as the next round.
+  /**
+   * Local state written while a round is in progress. Only the most recent
+   * write is retained — if the caller writes again before the round ends the
+   * earlier value is silently superseded. The retained write becomes the
+   * proposal for the next round once the current one commits.
+   */
   let pendingWrite: { state: TState | null } | null = null;
+  /** Consecutive hash-mismatch retries for the current logical write attempt. */
+  let retryCount = 0;
   // Propose messages that arrived for a future round while we were still in an
   // active round. Flushed into handlePropose once the current round commits.
-  let bufferedProposes: Array<{ msg: ProposeMessage; senderId: string }> = [];
+  const bufferedProposes: Array<{ msg: ProposeMessage; senderId: string }> = [];
 
   // ---------------------------------------------------------------------------
   // Helpers (closed over ctx at connect time)
@@ -283,12 +317,21 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     const allMatch = hashes.every((h) => h === hashes[0]);
 
     if (allMatch) {
+      retryCount = 0;
       commitRound(round);
     } else {
-      // Diverged — abort and retry with the merged state as the new proposal.
+      // Diverged — retry with the merged state as the new proposal, up to
+      // maxRetries times. If the limit is exceeded the round is abandoned and
+      // onMaxRetriesExceeded is invoked so the caller can react.
+      retryCount += 1;
       const retryState = round.mergedState;
       activeRound = null;
-      initiateRound(retryState);
+      if (retryCount > maxRetries) {
+        retryCount = 0;
+        onMaxRetriesExceeded?.(retryState);
+      } else {
+        initiateRound(retryState);
+      }
     }
   }
 
@@ -327,6 +370,71 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     });
     // If we are the only peer, skip straight to ready.
     checkAllProposed(round);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Peer departure handling
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Called whenever the peer list changes. If a peer has left while a round is
+   * active, remove it from all round bookkeeping and re-evaluate phase
+   * completion so the round can proceed (or be aborted if no peers remain).
+   */
+  function handlePeersChanged(currentPeers: string[]): void {
+    if (activeRound === null) return;
+
+    const round = activeRound;
+    const currentSet = new Set(currentPeers);
+
+    // Determine which peers in the round are no longer connected.
+    const departed: string[] = [];
+    for (const p of round.peers) {
+      if (!currentSet.has(p)) {
+        departed.push(p);
+      }
+    }
+
+    if (departed.length === 0) return;
+
+    for (const p of departed) {
+      round.peers.delete(p);
+      round.proposals.delete(p);
+      round.readyFrom.delete(p);
+      round.diffs.delete(p);
+      round.hashes.delete(p);
+    }
+
+    // If only the local peer remains (or the set is now empty) there is nobody
+    // left to reach consensus with — abort the round.
+    const peerId = getPeerId();
+    const remainingRemotes = [...round.peers].filter((p) => p !== peerId);
+    if (remainingRemotes.length === 0) {
+      activeRound = null;
+      // If we still have a pending write, start a new solo round so it commits.
+      if (pendingWrite !== null) {
+        const { state } = pendingWrite;
+        pendingWrite = null;
+        initiateRound(state);
+      }
+      return;
+    }
+
+    // Re-evaluate phase completion with the updated peer set.
+    switch (round.phase) {
+      case 'proposing':
+        checkAllProposed(round);
+        break;
+      case 'ready':
+        checkAllReady(round);
+        break;
+      case 'diffing':
+        checkAllDiffs(round);
+        break;
+      case 'hashing':
+        checkAllHashes(round);
+        break;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -437,7 +545,10 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
 
       const unsubWrite = ctx.onLocalWrite((state) => {
         if (activeRound !== null) {
-          // Queue the write; it will become the proposal for the next round.
+          // A round is already in progress. Store the write so it becomes the
+          // proposal for the next round. Only the most recent write is kept —
+          // if the caller writes multiple times before the round ends, all but
+          // the last are silently superseded (see pendingWrite declaration).
           pendingWrite = { state };
           return;
         }
@@ -455,10 +566,13 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
         } as unknown as Record<string, JSONSerializable>);
       });
 
+      const unsubPeers = ctx.onPeersChanged(handlePeersChanged);
+
       return () => {
         unsubMessage();
         unsubWrite();
         unsubConnected();
+        unsubPeers();
       };
     },
   };
