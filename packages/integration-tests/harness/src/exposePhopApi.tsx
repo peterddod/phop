@@ -1,4 +1,5 @@
 import {
+  createConsensusStrategy,
   createLamportStrategy,
   createLastWriteWinsStrategy,
   type JSONSerializable,
@@ -8,7 +9,7 @@ import {
 } from '@peterddod/phop';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export type SerializedStrategy = 'lamport' | 'lastWriteWins';
+export type SerializedStrategy = 'lamport' | 'lastWriteWins' | 'consensus';
 
 interface SliceRegistration {
   key: string;
@@ -49,6 +50,9 @@ function resolveStrategy(
 ): MergeStrategy<JSONSerializable, never> {
   if (name === 'lastWriteWins') {
     return createLastWriteWinsStrategy(getPeerId) as MergeStrategy<JSONSerializable, never>;
+  }
+  if (name === 'consensus') {
+    return createConsensusStrategy(getPeerId) as MergeStrategy<JSONSerializable, never>;
   }
   return createLamportStrategy(getPeerId) as MergeStrategy<JSONSerializable, never>;
 }

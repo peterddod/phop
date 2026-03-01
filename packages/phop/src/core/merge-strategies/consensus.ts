@@ -11,6 +11,8 @@ type ProposeMessage = {
   type: 'consensus-propose';
   index: number;
   localState: JSONSerializable | null;
+  /** True when the sender originated this round (has a pending write to propose). */
+  isInitiator?: boolean;
 };
 
 type ReadyMessage = {
@@ -33,11 +35,29 @@ type HashMessage = {
 
 type ConsensusMessage = ProposeMessage | ReadyMessage | DiffMessage | HashMessage;
 
+// Shape forwarded by the hook for standard state pushes (e.g. late-joiner sync).
+type StatePush = {
+  state: JSONSerializable | null;
+  meta: ConsensusMeta;
+};
+
 function isConsensusMessage(data: unknown): data is ConsensusMessage {
   if (typeof data !== 'object' || data === null) return false;
   const d = data as Record<string, unknown>;
   return (
     typeof d.type === 'string' && d.type.startsWith('consensus-') && typeof d.index === 'number'
+  );
+}
+
+function isStatePush(data: unknown): data is StatePush {
+  if (typeof data !== 'object' || data === null) return false;
+  const d = data as Record<string, unknown>;
+  return (
+    !('type' in d) &&
+    'state' in d &&
+    typeof d.meta === 'object' &&
+    d.meta !== null &&
+    typeof (d.meta as Record<string, unknown>).index === 'number'
   );
 }
 
@@ -70,15 +90,23 @@ function hashState(state: JSONSerializable | null): string {
 // ---------------------------------------------------------------------------
 
 type MergeFn<TState extends JSONSerializable> = (
-  states: Array<{ peerId: string; state: TState | null }>
+  states: Array<{ peerId: string; state: TState | null; isInitiator?: boolean }>
 ) => TState | null;
 
 function defaultMerge<TState extends JSONSerializable>(
-  states: Array<{ peerId: string; state: TState | null }>
+  states: Array<{ peerId: string; state: TState | null; isInitiator?: boolean }>
 ): TState | null {
-  // Sort by peer ID descending so the lexicographically greatest peer wins on
-  // conflicts — deterministic and identical across all peers.
-  const sorted = [...states].sort((a, b) => (a.peerId > b.peerId ? -1 : 1));
+  // Priority order (descending):
+  //  1. Initiators (peers with a new pending write) that have a non-null state.
+  //  2. Non-initiators with a non-null state.
+  //  3. All peers (including null states).
+  // Within each tier, the lexicographically greatest peer ID wins — deterministic
+  // and identical across all peers.
+  const initiatorNonNull = states.filter((s) => s.isInitiator && s.state !== null);
+  const nonNull = states.filter((s) => s.state !== null);
+  const candidates =
+    initiatorNonNull.length > 0 ? initiatorNonNull : nonNull.length > 0 ? nonNull : states;
+  const sorted = [...candidates].sort((a, b) => (a.peerId > b.peerId ? -1 : 1));
   return sorted[0]?.state ?? null;
 }
 
@@ -95,11 +123,13 @@ interface Round<TState extends JSONSerializable> {
   peers: Set<string>;
   /** Proposed local states received from each peer (including self). */
   proposals: Map<string, TState | null>;
-  /** Ready signals received. */
+  /** Peers that originated this round (have a pending write, not just joining). */
+  initiators: Set<string>;
+  /** Ready signals received (includes self). */
   readyFrom: Set<string>;
-  /** Diff (full proposed state) received from each peer. */
+  /** Diffs buffered before or during the diffing phase. */
   diffs: Map<string, TState | null>;
-  /** Hashes received from each peer. */
+  /** Hashes buffered before or during the hashing phase. */
   hashes: Map<string, string>;
   /** The merged next-state computed locally after applying all diffs. */
   mergedState: TState | null;
@@ -146,6 +176,9 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
   let activeRound: Round<TState> | null = null;
   // Local state written while a round is in progress — replayed as the next round.
   let pendingWrite: { state: TState | null } | null = null;
+  // Propose messages that arrived for a future round while we were still in an
+  // active round. Flushed into handlePropose once the current round commits.
+  let bufferedProposes: Array<{ msg: ProposeMessage; senderId: string }> = [];
 
   // ---------------------------------------------------------------------------
   // Helpers (closed over ctx at connect time)
@@ -157,11 +190,11 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     return ctx.getPeers().filter((p) => p !== getPeerId());
   }
 
-  function broadcast(msg: ConsensusMessage): void {
+  function broadcastMsg(msg: ConsensusMessage): void {
     ctx.broadcast(msg as unknown as Record<string, JSONSerializable>);
   }
 
-  function sendToPeer(peerId: string, msg: ConsensusMessage): void {
+  function sendMsg(peerId: string, msg: ConsensusMessage): void {
     ctx.sendToPeer(peerId, msg as unknown as Record<string, JSONSerializable>);
   }
 
@@ -177,6 +210,7 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
       phase: 'proposing',
       peers,
       proposals: new Map([[peerId, localState]]),
+      initiators: new Set(),
       readyFrom: new Set(),
       diffs: new Map(),
       hashes: new Map(),
@@ -188,7 +222,10 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
 
   function advanceToReady(round: Round<TState>): void {
     round.phase = 'ready';
-    broadcast({ type: 'consensus-ready', index: round.index });
+    // Include self in readyFrom before broadcasting so that if we're the only
+    // peer the check below fires immediately.
+    round.readyFrom.add(getPeerId());
+    broadcastMsg({ type: 'consensus-ready', index: round.index });
     checkAllReady(round);
   }
 
@@ -205,15 +242,16 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     for (const p of round.peers) {
       if (!round.readyFrom.has(p)) return;
     }
-    // All peers ready — send our proposed diff to every participant.
+    // All peers ready — enter diffing phase and send our proposed state.
     round.phase = 'diffing';
     const myState = round.proposals.get(getPeerId()) ?? null;
     round.diffs.set(getPeerId(), myState);
     for (const p of round.peers) {
       if (p !== getPeerId()) {
-        sendToPeer(p, { type: 'consensus-diff', index: round.index, state: myState });
+        sendMsg(p, { type: 'consensus-diff', index: round.index, state: myState });
       }
     }
+    // Flush any diffs that arrived before we entered this phase.
     checkAllDiffs(round);
   }
 
@@ -222,16 +260,19 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     for (const p of round.peers) {
       if (!round.diffs.has(p)) return;
     }
-    // Merge all diffs and hash.
+    // Merge all diffs and hash. Initiator diffs take priority in the default
+    // merge — if the caller supplied a custom mergeFn, pass all entries as-is.
     round.phase = 'hashing';
     const entries = Array.from(round.diffs.entries()).map(([peerId, state]) => ({
       peerId,
       state,
+      isInitiator: round.initiators.has(peerId),
     }));
     round.mergedState = merge(entries);
     const hash = hashState(round.mergedState);
     round.hashes.set(getPeerId(), hash);
-    broadcast({ type: 'consensus-hash', index: round.index, hash });
+    broadcastMsg({ type: 'consensus-hash', index: round.index, hash });
+    // Flush any hashes that arrived before we entered this phase.
     checkAllHashes(round);
   }
 
@@ -258,8 +299,17 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     activeRound = null;
     ctx.commit(round.mergedState, { index: newIndex });
 
-    // If a write arrived while the round was in progress, start the next round.
-    if (pendingWrite !== null) {
+    // Flush any propose messages that arrived for the next round while we were
+    // still processing this one — process them before checking pendingWrite so
+    // a remote-initiated round takes priority over a locally queued write.
+    const queued = bufferedProposes.splice(0);
+    for (const { msg, senderId } of queued) {
+      handlePropose(msg, senderId);
+    }
+
+    // If a local write arrived while the round was in progress and no remote
+    // round was started by the flush above, start the next round now.
+    if (activeRound === null && pendingWrite !== null) {
       const { state } = pendingWrite;
       pendingWrite = null;
       initiateRound(state);
@@ -269,10 +319,13 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
   function initiateRound(localState: TState | null): void {
     roundIndex += 1;
     const round = startRound(roundIndex, localState);
-    broadcast({
+    // Mark self as the initiator (has a new pending write).
+    round.initiators.add(getPeerId());
+    broadcastMsg({
       type: 'consensus-propose',
       index: round.index,
       localState,
+      isInitiator: true,
     });
     // If we are the only peer, skip straight to ready.
     checkAllProposed(round);
@@ -283,6 +336,12 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
   // ---------------------------------------------------------------------------
 
   function handleMessage(data: JSONSerializable, senderId: string): void {
+    // Standard state push from another peer (e.g. late-joiner sync).
+    if (isStatePush(data)) {
+      handleStatePush(data, senderId);
+      return;
+    }
+
     if (!isConsensusMessage(data)) return;
 
     switch (data.type) {
@@ -301,13 +360,23 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     }
   }
 
+  function handleStatePush(msg: StatePush, _senderId: string): void {
+    // Only apply if we have no active round and the incoming index is ahead of ours.
+    if (activeRound !== null) return;
+    const currentMeta = ctx.getMeta();
+    if (msg.meta.index > currentMeta.index) {
+      ctx.commit(msg.state as TState | null, msg.meta);
+    }
+  }
+
   function handlePropose(msg: ProposeMessage, senderId: string): void {
     // If we have no active round, join this one with our current local state.
     if (activeRound === null) {
       roundIndex = Math.max(roundIndex, msg.index);
       const round = startRound(msg.index, ctx.getState());
-      // Immediately broadcast our own proposal so others know we've joined.
-      broadcast({
+      if (msg.isInitiator) round.initiators.add(senderId);
+      // Broadcast our own proposal so others know we've joined.
+      broadcastMsg({
         type: 'consensus-propose',
         index: round.index,
         localState: ctx.getState(),
@@ -317,31 +386,43 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
       return;
     }
 
-    if (activeRound.index !== msg.index) return;
-    if (activeRound.proposals.has(senderId)) return;
-    activeRound.proposals.set(senderId, msg.localState as TState | null);
-    checkAllProposed(activeRound);
+    if (activeRound.index === msg.index) {
+      if (msg.isInitiator) activeRound.initiators.add(senderId);
+      if (activeRound.proposals.has(senderId)) return;
+      activeRound.proposals.set(senderId, msg.localState as TState | null);
+      checkAllProposed(activeRound);
+      return;
+    }
+
+    // Proposal is for a future round — buffer it so it isn't lost while we
+    // finish the current round.
+    if (msg.index > activeRound.index) {
+      bufferedProposes.push({ msg, senderId });
+    }
   }
 
   function handleReady(msg: ReadyMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
-    if (activeRound.phase !== 'ready') return;
     activeRound.readyFrom.add(senderId);
-    checkAllReady(activeRound);
+    if (activeRound.phase === 'ready') {
+      checkAllReady(activeRound);
+    }
   }
 
   function handleDiff(msg: DiffMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
-    if (activeRound.phase !== 'diffing') return;
     activeRound.diffs.set(senderId, msg.state as TState | null);
-    checkAllDiffs(activeRound);
+    if (activeRound.phase === 'diffing') {
+      checkAllDiffs(activeRound);
+    }
   }
 
   function handleHash(msg: HashMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
-    if (activeRound.phase !== 'hashing') return;
     activeRound.hashes.set(senderId, msg.hash);
-    checkAllHashes(activeRound);
+    if (activeRound.phase === 'hashing') {
+      checkAllHashes(activeRound);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -366,6 +447,10 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
       });
 
       const unsubConnected = ctx.onPeerConnected((remotePeerId) => {
+        // Push current committed state to the late joiner as a standard state
+        // payload. The hook wrapper adds the key, so the receiver's hook routes
+        // it as a SharedStatePayload and delivers { state, meta } to the
+        // strategy's onMessage as a StatePush.
         ctx.sendToPeer(remotePeerId, {
           state: ctx.getState(),
           meta: ctx.getMeta(),
