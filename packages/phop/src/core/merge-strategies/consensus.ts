@@ -495,7 +495,7 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     if (msg.meta.index > currentMeta.index) {
       ctx.commit(msg.state as TState | null, msg.meta);
       // Advance roundIndex so that any propose with an index at or below the
-      // newly committed index is rejected by the monotonic guard in handlePropose
+      // newly committed index is rejected by the monotonic guard in handlePropose.
       roundIndex = Math.max(roundIndex, msg.meta.index);
     }
   }
