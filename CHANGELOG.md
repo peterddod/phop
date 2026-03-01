@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/peterddod/phop/compare/v1.1.16...v1.2.0) (2026-03-01)
+
+
+### Features
+
+* **integration-tests:** add Playwright integration test suite ([4093af8](https://github.com/peterddod/phop/commit/4093af8b91214e56fa88821de3db37f4bf5980d6)), closes [hi#level](https://github.com/hi/issues/level)
+
 ## [1.1.16](https://github.com/peterddod/phop/compare/v1.1.15...v1.1.16) (2026-03-01)
 
 
