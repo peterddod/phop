@@ -1,3 +1,10 @@
+## [1.1.13](https://github.com/peterddod/phop/compare/v1.1.12...v1.1.13) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** restore registry-url and use NPM_TOKEN for npm publish auth ([bb7a813](https://github.com/peterddod/phop/commit/bb7a813f9d5490de11b3fbbc0df65d258d215251))
+
 ## [1.1.12](https://github.com/peterddod/phop/compare/v1.1.11...v1.1.12) (2026-03-01)
 
 
