@@ -81,6 +81,7 @@ jobs:
   semantic-release:
     name: Release
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (needs.changes.outputs.phop == 'true' || needs.changes.outputs.server == 'true')
     needs: [lint, changes, integration-test]
     permissions:
       contents: write
