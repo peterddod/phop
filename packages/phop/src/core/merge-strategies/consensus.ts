@@ -328,6 +328,9 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
       activeRound = null;
       if (retryCount > maxRetries) {
         retryCount = 0;
+        // Discard any locally queued write — replaying it after an aborted
+        // round would apply a stale write out of order.
+        pendingWrite = null;
         onMaxRetriesExceeded?.(retryState);
       } else {
         initiateRound(retryState);
@@ -478,7 +481,10 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
   function handlePropose(msg: ProposeMessage, senderId: string): void {
     // If we have no active round, join this one with our current local state.
     if (activeRound === null) {
-      roundIndex = Math.max(roundIndex, msg.index);
+      // Ignore stale proposals whose index does not advance past what we have
+      // already committed — accepting them could regress committed state.
+      if (msg.index <= roundIndex) return;
+      roundIndex = msg.index;
       const round = startRound(msg.index, ctx.getState());
       if (msg.isInitiator) round.initiators.add(senderId);
       // Broadcast our own proposal so others know we've joined.
@@ -493,6 +499,8 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
     }
 
     if (activeRound.index === msg.index) {
+      // Only peers that are already members of this round can contribute.
+      if (!activeRound.peers.has(senderId)) return;
       if (msg.isInitiator) activeRound.initiators.add(senderId);
       if (activeRound.proposals.has(senderId)) return;
       activeRound.proposals.set(senderId, msg.localState as TState | null);
@@ -509,6 +517,7 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
 
   function handleReady(msg: ReadyMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
+    if (!activeRound.peers.has(senderId)) return;
     activeRound.readyFrom.add(senderId);
     if (activeRound.phase === 'ready') {
       checkAllReady(activeRound);
@@ -517,6 +526,7 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
 
   function handleDiff(msg: DiffMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
+    if (!activeRound.peers.has(senderId)) return;
     activeRound.diffs.set(senderId, msg.state as TState | null);
     if (activeRound.phase === 'diffing') {
       checkAllDiffs(activeRound);
@@ -525,6 +535,7 @@ export function createConsensusStrategy<TState extends JSONSerializable>(
 
   function handleHash(msg: HashMessage, senderId: string): void {
     if (activeRound === null || activeRound.index !== msg.index) return;
+    if (!activeRound.peers.has(senderId)) return;
     activeRound.hashes.set(senderId, msg.hash);
     if (activeRound.phase === 'hashing') {
       checkAllHashes(activeRound);
