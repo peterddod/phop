@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "erasableSyntaxOnly": true,
+    "paths": {
+      "../../harness/src/exposePhopApi": ["./harness/src/exposePhopApi"]
+    }
+  },
+  "include": ["tests", "playwright.config.ts"]
+}

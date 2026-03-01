@@ -23,7 +23,8 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "biome check --write .",
-    "test": "echo \"No tests specified\""
+    "test": "echo \"No tests specified\"",
+    "test:integration": "bun --filter=integration-tests run test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
