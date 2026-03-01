@@ -19,7 +19,7 @@
     [
       "@semantic-release/npm",
       {
-        "pkgRoot": "packages/phop"
+        "npmPublish": false
       }
     ],
     "@semantic-release/github"
