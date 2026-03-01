@@ -221,12 +221,20 @@ export function useSharedState<
           return;
         }
 
-        if (!isSharedStatePayload(data) || data.key !== key) return;
+        if (typeof data !== 'object' || data === null) return;
+        const keyed = data as Record<string, JSONSerializable>;
+        if (keyed.key !== key) return;
 
-        // Strip the key and forward { state, meta } to the strategy's handlers.
-        const { state, meta } = data;
+        // For standard state payloads strip the namespace key before forwarding
+        // so strategies receive a consistent { state, meta } shape. For other
+        // keyed protocol messages (e.g. consensus rounds) forward the full
+        // payload so strategies can dispatch on their own message type field.
+        const forwarded: JSONSerializable = isSharedStatePayload(data)
+          ? ({ state: data.state, meta: data.meta } as JSONSerializable)
+          : (keyed as JSONSerializable);
+
         for (const handler of messageHandlersRef.current) {
-          handler({ state, meta } as JSONSerializable, senderId);
+          handler(forwarded, senderId);
         }
       });
 

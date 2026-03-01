@@ -1,5 +1,7 @@
 export { Room, RoomContext, type RoomContextValue } from './context';
 export {
+  type ConsensusMeta,
+  createConsensusStrategy,
   createLamportStrategy,
   createLastWriteWinsStrategy,
   type LamportMeta,
