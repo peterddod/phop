@@ -29,51 +29,6 @@ jobs:
       - name: Lint
         run: bun lint
 
-  build-lib:
-    name: Build library
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    needs: [semantic-release]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: ".bun-version"
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Build library
-        run: bun build:lib
-
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: phop-dist
-          path: packages/phop/dist/
-          retention-days: 1
-
-  build-server:
-    name: Build server
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    needs: [semantic-release]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: ".bun-version"
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Build server
-        run: bun build:server
-
   semantic-release:
     name: Release
     runs-on: ubuntu-latest
@@ -121,6 +76,51 @@ jobs:
             echo "released=false" >> $GITHUB_OUTPUT
           fi
 
+  build-lib:
+    name: Build library
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: [semantic-release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ".bun-version"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build library
+        run: bun build:lib
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phop-dist
+          path: packages/phop/dist/
+          retention-days: 1
+
+  build-server:
+    name: Build server
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: [semantic-release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ".bun-version"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build server
+        run: bun build:server
+
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
@@ -133,7 +133,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.14.0"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download dist artifact
