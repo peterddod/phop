@@ -1,3 +1,10 @@
+## [1.1.11](https://github.com/peterddod/phop/compare/v1.1.10...v1.1.11) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** add --provenance flag to npm publish for Trusted Publisher OIDC ([aa21d8a](https://github.com/peterddod/phop/commit/aa21d8ac3c32bd888d31572fae6cebd21322d416))
+
 ## [1.1.10](https://github.com/peterddod/phop/compare/v1.1.9...v1.1.10) (2026-03-01)
 
 
