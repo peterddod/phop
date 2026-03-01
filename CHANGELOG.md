@@ -1,3 +1,10 @@
+## [1.1.15](https://github.com/peterddod/phop/compare/v1.1.14...v1.1.15) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** pin Node to 22.14.0 for trusted publisher npm CLI requirement ([576fca9](https://github.com/peterddod/phop/commit/576fca9a4040fcf3b15f01208d5ab44db542622f))
+
 ## [1.1.14](https://github.com/peterddod/phop/compare/v1.1.13...v1.1.14) (2026-03-01)
 
 

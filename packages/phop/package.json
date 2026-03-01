@@ -1,6 +1,6 @@
 {
   "name": "@peterddod/phop",
-  "version": "1.1.14",
+  "version": "1.1.15",
   "description": "Peer-to-peer state management for React using WebRTC. Share and sync state across browsers in real time — no backend required.",
   "keywords": [
     "react",
