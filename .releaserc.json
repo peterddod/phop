@@ -12,14 +12,24 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node scripts/bump-version.mjs ${nextRelease.version} && echo ${nextRelease.version} > .release-version",
-        "successCmd": "git add CHANGELOG.md packages/phop/package.json packages/signalling-server/package.json && git commit -m \"chore(release): ${nextRelease.version} [skip ci]\" && git push origin HEAD:main"
+        "prepareCmd": "node scripts/bump-version.mjs ${nextRelease.version} && echo ${nextRelease.version} > .release-version"
       }
     ],
     [
       "@semantic-release/npm",
       {
         "npmPublish": false
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "CHANGELOG.md",
+          "packages/phop/package.json",
+          "packages/signalling-server/package.json"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci]"
       }
     ],
     "@semantic-release/github"
