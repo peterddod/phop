@@ -120,7 +120,7 @@ const {
   peers,          // signalling membership, deduplicated, including self
   remotePeers,    // peers without self
   connectedPeers, // remote peers with an open data channel
-  isConnected,    // signalling connection is up (false after it drops)
+  isConnected,    // signalling connection is up (see below)
   broadcast,
   sendToPeer,
   onMessage,
@@ -128,6 +128,8 @@ const {
   onPeerDisconnected,
 } = useRoom();
 ```
+
+If the signalling connection drops, `isConnected` becomes `false`, `peers` shrinks to self and every data channel closes. The room does not reconnect by itself: remount `<Room>` (for example by changing its React `key`) to join again, which gives you a new `peerId`.
 
 ### `useChannel(name, validate)`
 
@@ -169,7 +171,7 @@ if (phase === 'lobby') return isLobbyHost ? <button onClick={() => start({ seed 
 return <Game players={match.players} seed={match.config.seed} />;
 ```
 
-Peers who connect once a match is running land in `in-progress`. Pass `validateConfig` to guard the start config.
+Peers who connect once a match is running land in `in-progress`. Pass `validateConfig` to guard the start config. Lobby messages are accepted only from the host of the roster they carry, as seen from your own view of the room.
 
 ### `useHostedSimulation(key, options)`
 
@@ -187,8 +189,8 @@ const { getState, dispatch, tick, isHost, hostId } = useHostedSimulation<State, 
 });
 ```
 
-- **Host migration.** When the host leaves, the next player takes over after a short grace period (`migrationGraceMs`, default 1000). A demoted host hands its state to the new host, so a returning host never rolls the match back.
-- **Cut-off guard.** A host that loses the signalling server, or sees every remaining rival vanish at once, pauses instead of simulating alone.
+- **Host migration.** When the host leaves, the next player takes over after a short grace period (`migrationGraceMs`, default 1000). A demoted host hands its state to the new host, resending until the data channel is open, so a returning host never rolls the match back. The new host accepts that handover only from the peer that held authority in between, and only if its tick is plausible.
+- **Cut-off guard.** A host that sees every remaining rival vanish at once pauses instead of simulating alone, and resumes if they reappear. A host that loses the signalling server stops for good (see `useRoom`).
 - **Hidden tabs.** The loop runs on a worker timer, so it keeps going when the host's tab is hidden.
 - **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta` and `maxCatchUp`.
 

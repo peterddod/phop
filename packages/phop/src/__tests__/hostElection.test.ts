@@ -97,7 +97,8 @@ describe('shouldAdoptSnapshot', () => {
     tick: 10,
     lastAppliedTick: 5,
     ownTick: 5,
-    handoverOpen: false,
+    handoverFrom: null,
+    maxHandoverTick: 100,
   };
 
   test('non-host adopts a newer snapshot from the current host', () => {
@@ -116,16 +117,27 @@ describe('shouldAdoptSnapshot', () => {
     );
   });
 
-  test("a promoted host adopts the previous host's handover only while open and ahead", () => {
-    const promoted = { ...base, selfId: 'a', currentHost: 'a', senderId: 'b', hostId: 'b' };
-    expect(shouldAdoptSnapshot({ ...promoted, handoverOpen: true, tick: 20, ownTick: 12 })).toBe(
-      true
-    );
-    expect(shouldAdoptSnapshot({ ...promoted, handoverOpen: true, tick: 10, ownTick: 12 })).toBe(
+  test("a promoted host adopts only the expected previous host's handover", () => {
+    const promoted = {
+      ...base,
+      selfId: 'a',
+      currentHost: 'a',
+      senderId: 'b',
+      hostId: 'b',
+      handoverFrom: 'b',
+    };
+    expect(shouldAdoptSnapshot({ ...promoted, tick: 20, ownTick: 12 })).toBe(true);
+    // Behind us.
+    expect(shouldAdoptSnapshot({ ...promoted, tick: 10, ownTick: 12 })).toBe(false);
+    // Window closed.
+    expect(shouldAdoptSnapshot({ ...promoted, handoverFrom: null, tick: 20, ownTick: 12 })).toBe(
       false
     );
-    expect(shouldAdoptSnapshot({ ...promoted, handoverOpen: false, tick: 20, ownTick: 12 })).toBe(
-      false
-    );
+    // Another player posing as the previous host.
+    expect(
+      shouldAdoptSnapshot({ ...promoted, senderId: 'c', hostId: 'c', tick: 20, ownTick: 12 })
+    ).toBe(false);
+    // Implausibly far ahead.
+    expect(shouldAdoptSnapshot({ ...promoted, tick: 101, ownTick: 12 })).toBe(false);
   });
 });

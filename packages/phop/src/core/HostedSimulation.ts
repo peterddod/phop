@@ -6,6 +6,12 @@ import { startTicker } from './ticker';
 export interface SimulationRoom extends ChannelRoom {
   peers: string[];
   isConnected: boolean;
+  /**
+   * Peers with an open data channel, and a callback when one opens. They let
+   * a host handover wait for the channel; rooms without them skip the wait.
+   */
+  connectedPeers?: string[];
+  onPeerConnected?: (handler: (remotePeerId: string) => void) => () => void;
 }
 
 export interface PlayerInput<TInput> {
@@ -60,6 +66,11 @@ interface Snapshot<TState> {
 
 const now = () => performance.now();
 
+// A demoted host resends its handover at this interval until the new host's
+// snapshots arrive, since the data channel may not be open yet.
+const HANDOVER_RESEND_MS = 250;
+const MIN_HANDOVER_RETRY_MS = 5000;
+
 /**
  * Host-authoritative fixed-step simulation.
  *
@@ -70,7 +81,8 @@ const now = () => performance.now();
  *
  * Host changes are handled without rollback: a promoted host waits for a
  * short grace period and accepts a handover snapshot from the previous host
- * if that is ahead of its own state. A host that looks cut off (signalling
+ * (and only that peer) if it is ahead of its own state by a plausible amount.
+ * The demoted host keeps resending the handover until the channel is up. A host that looks cut off (signalling
  * lost, or every rival gone at once) holds instead of simulating alone.
  *
  * Framework-agnostic; `useHostedSimulation` binds it to React.
@@ -86,8 +98,15 @@ export class HostedSimulation<TState, TInput> {
   private localQueue: TInput[] = [];
   private remoteQueue: PlayerInput<TInput>[] = [];
   private graceUntil = 0;
-  // While open, a freshly promoted host accepts the previous host's handover.
+  // While open, a freshly promoted host accepts `handoverFrom`'s handover.
   private handoverUntil = 0;
+  private handoverFrom: string | null = null;
+  // Longest we hold waiting for `handoverFrom`'s channel to open.
+  private handoverDeadline = 0;
+  // Demoted side: the handover still to be delivered.
+  private pendingHandover: { to: string; until: number; lastSent: number } | null = null;
+  // When our tick last advanced; bounds how far a handover may jump.
+  private lastProgressAt = now();
   private readonly absentSince = new Map<string, number>();
   private readonly absenceHandled = new Set<string>();
   private hostId: string | null = null;
@@ -164,6 +183,7 @@ export class HostedSimulation<TState, TInput> {
     this.cleanups.push(
       this.inputChannel.subscribe(this.handleInput),
       this.snapshotChannel.subscribe(this.handleSnapshot),
+      this.room.onPeerConnected?.(this.handlePeerConnected) ?? (() => {}),
       startTicker(this.options.loopIntervalMs ?? this.dt * 500, (t) => this.frame(t))
     );
     this.updateHost();
@@ -193,6 +213,22 @@ export class HostedSimulation<TState, TInput> {
     return this.options.dt ?? 0.1;
   }
 
+  private get graceMs(): number {
+    return this.options.migrationGraceMs ?? 1000;
+  }
+
+  private get handoverRetryMs(): number {
+    return Math.max(MIN_HANDOVER_RETRY_MS, 3 * this.graceMs);
+  }
+
+  /** The previous host is in the room but its channel isn't open yet. */
+  private awaitingHandoverChannel(): boolean {
+    const from = this.handoverFrom;
+    const connected = this.room.connectedPeers;
+    if (!from || !connected || now() >= this.handoverDeadline) return false;
+    return this.room.peers.includes(from) && !connected.includes(from);
+  }
+
   private get isMultiplayer(): boolean {
     return this.players.length > 1;
   }
@@ -219,9 +255,11 @@ export class HostedSimulation<TState, TInput> {
    * Promotion, or a host reconnecting after being cut off: arm the grace (so
    * in-flight snapshots settle) and the handover window, and drop remote
    * inputs queued before, since they were aimed at an earlier authority's
-   * tick. A cut-off host never lost host status in its own view, so without
-   * the reconnect case it would reject the handover and roll the match back.
-   * Demotion: hand our state to the new host, which adopts it if it is ahead.
+   * tick. The handover is accepted only from the peer that held authority in
+   * the meantime: the host we followed, or, after a cut-off, whoever the
+   * others elected without us. A cut-off host never lost host status in its
+   * own view, so without the reconnect case it would roll the match back.
+   * Demotion: hand our state to the new host (resent until it lands).
    * Any host change: reset the snapshot-tick guard, since the new host may be
    * slightly behind the one we last followed.
    */
@@ -245,19 +283,66 @@ export class HostedSimulation<TState, TInput> {
     this.cutOff = cutOff;
 
     if (isHost && (!this.wasHost || reconnected) && this.isMultiplayer) {
-      const until = now() + (this.options.migrationGraceMs ?? 1000);
+      const until = now() + this.graceMs;
       this.graceUntil = until;
       this.handoverUntil = until;
+      this.handoverDeadline = now() + this.handoverRetryMs;
+      this.handoverFrom = reconnected
+        ? electHost(
+            this.players.filter((p) => p !== self),
+            presentCandidates(this.players, self, this.room.peers)
+          )
+        : prevHost !== self
+          ? prevHost
+          : null;
       this.remoteQueue = [];
     }
     if (!isHost && host !== prevHost) {
       this.lastAppliedTick = -1;
     }
     if (!isHost && this.wasHost && host !== null && this.isMultiplayer) {
-      this.snapshotChannel.send(host, { hostId: self, tick: this.tick, state: this.state });
+      this.pendingHandover = {
+        to: host,
+        until: now() + this.handoverRetryMs,
+        lastSent: -Infinity,
+      };
+      this.sendHandover();
+    }
+    if (this.pendingHandover && (isHost || host !== this.pendingHandover.to)) {
+      this.pendingHandover = null;
     }
     this.wasHost = isHost;
   }
+
+  private sendHandover(): void {
+    const pending = this.pendingHandover;
+    if (!pending) return;
+    const t = now();
+    if (t >= pending.until) {
+      this.pendingHandover = null;
+      return;
+    }
+    if (t - pending.lastSent < HANDOVER_RESEND_MS) return;
+    pending.lastSent = t;
+    this.snapshotChannel.send(pending.to, {
+      hostId: this.room.peerId,
+      tick: this.tick,
+      state: this.state,
+    });
+  }
+
+  private handlePeerConnected = (remotePeerId: string): void => {
+    if (this.pendingHandover?.to === remotePeerId) {
+      this.pendingHandover.lastSent = -Infinity;
+      this.sendHandover();
+    }
+    // The previous host's channel just opened: give its handover time to land.
+    if (remotePeerId === this.handoverFrom && now() < this.handoverDeadline) {
+      const until = now() + this.graceMs;
+      this.graceUntil = Math.max(this.graceUntil, until);
+      this.handoverUntil = Math.max(this.handoverUntil, until);
+    }
+  };
 
   private isSnapshot = (data: unknown): data is Snapshot<TState> => {
     if (typeof data !== 'object' || data === null) return false;
@@ -285,13 +370,23 @@ export class HostedSimulation<TState, TInput> {
       tick: snap.tick,
       lastAppliedTick: this.lastAppliedTick,
       ownTick: this.tick,
-      handoverOpen: this.cutOff || now() < this.handoverUntil,
+      handoverFrom: now() < this.handoverUntil ? this.handoverFrom : null,
+      maxHandoverTick: this.maxHandoverTick(),
     });
     if (!adopt) return;
     this.state = snap.state;
     this.tick = snap.tick;
     this.lastAppliedTick = snap.tick;
+    this.lastProgressAt = now();
+    // The new host's snapshots have overtaken our handover.
+    this.pendingHandover = null;
     this.bump();
+  };
+
+  /** Our tick plus however many steps the other host could have run since ours stalled. */
+  private maxHandoverTick = (): number => {
+    const elapsed = (now() - this.lastProgressAt) / 1000 + (this.options.maxCatchUp ?? 1);
+    return this.tick + Math.ceil(elapsed / this.dt) + 1;
   };
 
   private hold(t: number): void {
@@ -304,6 +399,7 @@ export class HostedSimulation<TState, TInput> {
     const self = this.room.peerId;
 
     if (this.hostId !== self) {
+      this.sendHandover();
       this.hold(t);
       return;
     }
@@ -315,7 +411,7 @@ export class HostedSimulation<TState, TInput> {
       return;
     }
 
-    if (now() < this.graceUntil) {
+    if (now() < this.graceUntil || this.awaitingHandoverChannel()) {
       this.hold(t);
       return;
     }
@@ -348,6 +444,7 @@ export class HostedSimulation<TState, TInput> {
       if (next !== undefined) this.state = next;
       this.tick++;
       this.lastAppliedTick = this.tick;
+      this.lastProgressAt = now();
       this.accumulator -= dt;
       stepped = true;
     }

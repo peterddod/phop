@@ -58,8 +58,13 @@ export interface SnapshotCheck {
   lastAppliedTick: number;
   /** Our own state's tick. */
   ownTick: number;
-  /** We were just promoted and still accept the previous host's handover. */
-  handoverOpen: boolean;
+  /**
+   * While we are a freshly promoted (or reconnected) host: the one peer whose
+   * handover we accept. Null when no handover is expected.
+   */
+  handoverFrom: string | null;
+  /** Highest tick a handover may claim, bounding how far ahead it can jump. */
+  maxHandoverTick: number;
 }
 
 /**
@@ -67,13 +72,17 @@ export interface SnapshotCheck {
  *
  * - The body's hostId must be the real sender, who must be a candidate.
  * - As a non-host: only from the current host, and only newer ticks.
- * - As a freshly promoted host: the previous host's handover snapshot, if it
- *   is ahead of us, so re-taking authority never rolls its progress back.
+ * - As a freshly promoted host: only the expected previous host's handover,
+ *   and only if it is ahead of us without jumping implausibly far, so
+ *   re-taking authority never rolls its progress back and nobody else can
+ *   inject state.
  */
 export function shouldAdoptSnapshot(c: SnapshotCheck): boolean {
   if (c.senderId !== c.hostId) return false;
   if (!c.candidates.includes(c.senderId)) return false;
-  if (c.currentHost === c.selfId) return c.handoverOpen && c.tick > c.ownTick;
+  if (c.currentHost === c.selfId) {
+    return c.senderId === c.handoverFrom && c.tick > c.ownTick && c.tick <= c.maxHandoverTick;
+  }
   if (c.hostId !== c.currentHost) return false;
   return c.tick > c.lastAppliedTick;
 }

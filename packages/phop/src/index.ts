@@ -22,6 +22,7 @@ export { type RoomHandle, SharedStateController } from './core/SharedStateContro
 export {
   type LobbyPhase,
   type Match,
+  type RoomApi,
   type UseHostedSimulationResult,
   type UseHostOptions,
   type UseHostResult,

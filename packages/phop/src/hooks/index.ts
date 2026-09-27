@@ -8,5 +8,5 @@ export {
   type UseLobbyResult,
   useLobby,
 } from './useLobby';
-export { useRoom } from './useRoom';
+export { type RoomApi, useRoom } from './useRoom';
 export { useSharedState } from './useSharedState';

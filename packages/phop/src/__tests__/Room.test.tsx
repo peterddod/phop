@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import type { PropsWithChildren } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Room } from '../context/Room';
+import { SignalingClient } from '../core/SignalingClient';
 import { useRoom } from '../hooks/useRoom';
 
 class FakeWebSocket {
@@ -43,6 +44,21 @@ class FakeWebSocket {
   }
 }
 
+class FakeRTCPeerConnection {
+  onicecandidate: unknown = null;
+  ondatachannel: unknown = null;
+  createDataChannel() {
+    return { close() {} };
+  }
+  createOffer() {
+    return Promise.resolve({});
+  }
+  setLocalDescription() {
+    return Promise.resolve();
+  }
+  close() {}
+}
+
 const wrapper = ({ children }: PropsWithChildren) => (
   <Room signallingServerUrl="ws://test" roomId="room">
     {children}
@@ -74,15 +90,35 @@ describe('Room', () => {
     expect(result.current.isConnected).toBe(true);
   });
 
-  it('reports isConnected false when the signalling socket drops', () => {
+  it('SignalingClient emits disconnected on a drop but not on disconnect()', () => {
+    const onDisconnected = vi.fn();
+    const intentional = new SignalingClient('ws://test', 'room');
+    intentional.on('disconnected', onDisconnected);
+    void intentional.connect();
+    FakeWebSocket.instances[0].open();
+    intentional.disconnect();
+    expect(onDisconnected).not.toHaveBeenCalled();
+
+    const dropped = new SignalingClient('ws://test', 'room');
+    dropped.on('disconnected', onDisconnected);
+    void dropped.connect();
+    FakeWebSocket.instances[1].open();
+    FakeWebSocket.instances[1].drop();
+    expect(onDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports isConnected false and drops stale peers when the signalling socket drops', () => {
+    vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
     const { result } = renderHook(() => useRoom(), { wrapper });
     const ws = FakeWebSocket.instances[0];
     act(() => {
       ws.open();
-      ws.receive({ type: 'joined', peerId: 'self', peers: ['self'] });
+      ws.receive({ type: 'joined', peerId: 'self', peers: ['self', 'other'] });
     });
+    expect(result.current.peers).toEqual(['self', 'other']);
     expect(result.current.isConnected).toBe(true);
     act(() => ws.drop());
     expect(result.current.isConnected).toBe(false);
+    expect(result.current.peers).toEqual(['self']);
   });
 });

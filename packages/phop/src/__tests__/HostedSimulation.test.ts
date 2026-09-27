@@ -28,9 +28,10 @@ function options(
 
 function setup(
   players: string[],
-  overrides: Partial<HostedSimulationOptions<TestState, string>> = {}
+  overrides: Partial<HostedSimulationOptions<TestState, string>> = {},
+  network: { requireLinks?: boolean } = {}
 ) {
-  const net = createMockNetwork();
+  const net = createMockNetwork(network);
   const rooms: Record<string, MockRoom> = {};
   const sims: Record<string, HostedSimulation<TestState, string>> = {};
   for (const p of players) rooms[p] = net.join(p);
@@ -159,6 +160,74 @@ describe('HostedSimulation', () => {
     sync();
     expect(sims.a.getHostId()).toBe('a');
     expect(sims.a.getTick()).toBe(bTick);
+  });
+
+  it('rejects a handover from anyone but the previous host, and implausible ticks', () => {
+    const { net, sims, sync } = setup(['a', 'b', 'c', 'd']);
+    vi.advanceTimersByTime(500);
+    const before = sims.b.getTick();
+
+    // a leaves; b is promoted and expects a handover only from a.
+    net.setMembers(['b', 'c', 'd']);
+    sync();
+    const evil = { count: -1, log: ['evil'] };
+    net.inject('d', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'd', tick: Number.MAX_SAFE_INTEGER, state: evil },
+    });
+    net.inject('c', 'b', { ch: 'sim:snapshot', d: { hostId: 'c', tick: before + 1, state: evil } });
+    expect(sims.b.getState().log).not.toContain('evil');
+    expect(sims.b.getTick()).toBe(before);
+
+    vi.advanceTimersByTime(1000);
+    expect(sims.b.getTick()).toBeGreaterThan(before);
+    expect(sims.c.getTick()).toBe(sims.b.getTick());
+  });
+
+  it('caps how far ahead a legitimate handover may jump', () => {
+    const { net, sims, sync } = setup(['a', 'b', 'c']);
+    vi.advanceTimersByTime(500);
+    net.setMembers(['a'], ['a']);
+    net.setMembers(['b', 'c'], ['b', 'c']);
+    sync();
+    vi.advanceTimersByTime(1000);
+
+    net.setMembers(['a', 'b', 'c'], ['a']);
+    sync();
+    const aTick = sims.a.getTick();
+    net.inject('b', 'a', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'b', tick: aTick + 10_000, state: { count: 0, log: ['far'] } },
+    });
+    expect(sims.a.getTick()).toBe(aTick);
+  });
+
+  it('resends the handover once the data channel to the new host opens', () => {
+    const { net, sims, sync } = setup(['a', 'b', 'c'], {}, { requireLinks: true });
+    net.openLink('a', 'b');
+    net.openLink('a', 'c');
+    net.openLink('b', 'c');
+    vi.advanceTimersByTime(500);
+
+    // a vanishes; its channels close. b takes over and runs ahead.
+    net.closeLink('a', 'b');
+    net.closeLink('a', 'c');
+    net.setMembers(['b', 'c'], ['b', 'c']);
+    net.setMembers(['a'], ['a']);
+    sync();
+    vi.advanceTimersByTime(2000);
+    const bTick = sims.b.getTick();
+
+    // a reappears in signalling first; the handover can't be delivered yet.
+    net.setMembers(['a', 'b', 'c']);
+    sync();
+    expect(sims.a.getTick()).toBeLessThan(bTick);
+
+    // Channels open 600ms later, still inside the retry window.
+    vi.advanceTimersByTime(600);
+    net.openLink('a', 'b');
+    net.openLink('a', 'c');
+    expect(sims.a.getTick()).toBeGreaterThanOrEqual(bTick);
   });
 
   it('holds while cut off instead of simulating alone', () => {

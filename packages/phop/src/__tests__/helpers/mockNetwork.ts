@@ -11,13 +11,19 @@ export interface MockRoom extends SimulationRoom {
  * In-memory room mesh. Messages are delivered synchronously as a JSON round
  * trip to peers listed in the sender's `peers`, with `senderId` set by the
  * "transport" like the real Room does.
+ *
+ * With `requireLinks`, messages are dropped (as a real closed data channel
+ * would) until `openLink` connects the pair.
  */
-export function createMockNetwork() {
+export function createMockNetwork({ requireLinks = false } = {}) {
   const rooms = new Map<string, MockRoom>();
+  const links = new Set<string>();
+  const linkKey = (a: string, b: string) => [a, b].sort().join('|');
 
   function deliver(from: string, to: string, message: Message<JSONSerializable>) {
     const target = rooms.get(to);
     if (!target || to === from) return;
+    if (requireLinks && !links.has(linkKey(from, to))) return;
     const wire = JSON.parse(JSON.stringify(message)) as Message<JSONSerializable>;
     for (const h of target.handlers) h({ ...wire, senderId: from });
   }
@@ -27,6 +33,7 @@ export function createMockNetwork() {
       peerId,
       peers: [peerId],
       isConnected: true,
+      connectedPeers: requireLinks ? [] : undefined,
       handlers: new Set(),
       peerConnectedHandlers: new Set(),
       broadcast: (message) => {
@@ -34,6 +41,12 @@ export function createMockNetwork() {
       },
       sendToPeer: (to, message) => {
         if (room.peers.includes(to)) deliver(peerId, to, message);
+      },
+      onPeerConnected: (handler) => {
+        room.peerConnectedHandlers.add(handler);
+        return () => {
+          room.peerConnectedHandlers.delete(handler);
+        };
       },
       onMessage: (handler) => {
         room.handlers.add(handler as MessageHandler);
@@ -65,7 +78,29 @@ export function createMockNetwork() {
     if (room) for (const h of room.peerConnectedHandlers) h(remotePeerId);
   }
 
-  return { join, setMembers, inject, connect, rooms };
+  /** Open the data channel between two peers and fire `onPeerConnected` on both. */
+  function setConnected(a: string, b: string, open: boolean) {
+    const room = rooms.get(a);
+    if (!room) return;
+    const others = (room.connectedPeers ?? []).filter((p) => p !== b);
+    room.connectedPeers = open ? [...others, b] : others;
+  }
+
+  function openLink(a: string, b: string) {
+    links.add(linkKey(a, b));
+    setConnected(a, b, true);
+    setConnected(b, a, true);
+    connect(a, b);
+    connect(b, a);
+  }
+
+  function closeLink(a: string, b: string) {
+    links.delete(linkKey(a, b));
+    setConnected(a, b, false);
+    setConnected(b, a, false);
+  }
+
+  return { join, setMembers, inject, connect, openLink, closeLink, rooms };
 }
 
 /** Snapshot a mock room as a Room context value (re-create after changes). */
@@ -76,17 +111,12 @@ export function toContextValue(room: MockRoom): RoomContextValue {
     peerId: room.peerId,
     peers: [...room.peers],
     remotePeers: remote,
-    connectedPeers: remote,
+    connectedPeers: room.connectedPeers ?? remote,
     isConnected: room.isConnected,
     broadcast: room.broadcast,
     sendToPeer: room.sendToPeer,
     onMessage: room.onMessage,
-    onPeerConnected: (handler) => {
-      room.peerConnectedHandlers.add(handler);
-      return () => {
-        room.peerConnectedHandlers.delete(handler);
-      };
-    },
+    onPeerConnected: room.onPeerConnected as RoomContextValue['onPeerConnected'],
     onPeerDisconnected: () => () => {},
   };
 }

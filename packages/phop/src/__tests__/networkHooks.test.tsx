@@ -6,6 +6,7 @@ import { useChannel } from '../hooks/useChannel';
 import { useHost } from '../hooks/useHost';
 import { useHostedSimulation } from '../hooks/useHostedSimulation';
 import { useLobby } from '../hooks/useLobby';
+import { useRoom } from '../hooks/useRoom';
 import { createMockNetwork, type MockRoom, toContextValue } from './helpers/mockNetwork';
 
 function peerWrapper(room: MockRoom) {
@@ -53,6 +54,29 @@ describe('useChannel', () => {
     const first = result.current;
     rerender();
     expect(result.current).toBe(first);
+  });
+});
+
+describe('useRoom', () => {
+  it('fills in fields a 1.x-shaped provider leaves out', () => {
+    const legacy = {
+      roomId: 'r',
+      peerId: 'a',
+      peers: ['a', 'b'],
+      isConnected: true,
+      broadcast: () => {},
+      sendToPeer: () => {},
+      onMessage: () => () => {},
+      onPeerConnected: () => () => {},
+    };
+    const { result } = renderHook(() => useRoom(), {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <RoomContext.Provider value={legacy}>{children}</RoomContext.Provider>
+      ),
+    });
+    expect(result.current.remotePeers).toEqual(['b']);
+    expect(result.current.connectedPeers).toEqual(['b']);
+    expect(typeof result.current.onPeerDisconnected(() => {})).toBe('function');
   });
 });
 
@@ -125,6 +149,36 @@ describe('useLobby', () => {
       net.connect('b', 'c');
     });
     expect(late.result.current.phase).toBe('in-progress');
+  });
+
+  it('ignores start and in-progress from anyone but the roster host', () => {
+    const { net, lobbies } = setupLobby(['a', 'b', 'c']);
+    // c (not the lowest) tries to start a match of itself and b.
+    act(() => {
+      net.inject('c', 'b', { ch: 'lobby', d: { type: 'start', players: ['b', 'c'], config: {} } });
+    });
+    expect(lobbies.b.result.current.phase).toBe('lobby');
+    // c tries to lock b out.
+    act(() => {
+      net.inject('c', 'b', { ch: 'lobby', d: { type: 'in-progress', players: ['a', 'c'] } });
+    });
+    expect(lobbies.b.result.current.phase).toBe('lobby');
+    // Pre-fix message shape without a roster is rejected outright.
+    act(() => {
+      net.inject('a', 'b', { ch: 'lobby', d: { type: 'in-progress' } });
+    });
+    expect(lobbies.b.result.current.phase).toBe('lobby');
+  });
+
+  it('dedupes a received roster', () => {
+    const { net, lobbies } = setupLobby(['a', 'b']);
+    act(() => {
+      net.inject('a', 'b', {
+        ch: 'lobby',
+        d: { type: 'start', players: ['b', 'a', 'b'], config: { seed: 'x' } },
+      });
+    });
+    expect(lobbies.b.result.current.match?.players).toEqual(['a', 'b']);
   });
 
   it('re-sends the start to a roster member whose channel opened late', () => {

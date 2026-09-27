@@ -34,7 +34,15 @@ export interface UseLobbyResult<TConfig> {
 
 type LobbyMessage<TConfig> =
   | { type: 'start'; players: string[]; config: TConfig }
-  | { type: 'in-progress' };
+  | { type: 'in-progress'; players: string[] };
+
+function isRoster(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((p) => typeof p === 'string' && p.length > 0)
+  );
+}
 
 /**
  * Pre-match lobby and match lifecycle.
@@ -43,6 +51,9 @@ type LobbyMessage<TConfig> =
  * Peers that connect once a match is running are told so by the match's
  * current host and land in the `in-progress` phase; roster members whose
  * channel opened too late to see the start are sent it again.
+ *
+ * Lobby messages are only accepted from the peer that should be sending them:
+ * the host of the roster they carry, as elected from our own view of the room.
  */
 export function useLobby<TConfig = undefined>(
   key = 'lobby',
@@ -63,10 +74,9 @@ export function useLobby<TConfig = undefined>(
   const isLobbyMessage = useCallback((data: unknown): data is LobbyMessage<TConfig> => {
     if (typeof data !== 'object' || data === null) return false;
     const msg = data as Record<string, unknown>;
+    if (!isRoster(msg.players)) return false;
     if (msg.type === 'in-progress') return true;
     if (msg.type !== 'start') return false;
-    if (!Array.isArray(msg.players) || msg.players.length === 0) return false;
-    if (!msg.players.every((p) => typeof p === 'string' && p.length > 0)) return false;
     return validateConfigRef.current?.(msg.config) ?? true;
   }, []);
   const channel = useChannel(key, isLobbyMessage);
@@ -96,16 +106,16 @@ export function useLobby<TConfig = undefined>(
     () =>
       channel.subscribe((msg, senderId) => {
         if (phaseRef.current !== 'lobby') return;
-        if (msg.type === 'in-progress') {
+        const self = peerIdRef.current;
+        const roster = Array.from(new Set(msg.players)).sort();
+        // Only the roster's current host, as we see the room, may speak for it.
+        const host = electHost(roster, presentCandidates(roster, self, peersRef.current));
+        if (senderId !== host) return;
+        if (msg.type === 'in-progress' || !roster.includes(self)) {
           setPhase('in-progress');
           return;
         }
-        if (!msg.players.includes(senderId)) return;
-        if (!msg.players.includes(peerIdRef.current)) {
-          setPhase('in-progress');
-          return;
-        }
-        setMatch({ players: [...msg.players].sort(), config: msg.config });
+        setMatch({ players: roster, config: msg.config });
         setPhase('playing');
       }),
     [channel]
@@ -127,7 +137,7 @@ export function useLobby<TConfig = undefined>(
           newPeer,
           current.players.includes(newPeer)
             ? { type: 'start', ...current }
-            : { type: 'in-progress' }
+            : { type: 'in-progress', players: current.players }
         );
       }),
     [onPeerConnected, channel]

@@ -8,11 +8,18 @@ export interface RoomContextValue {
   peerId: string;
   /** Deduplicated signalling membership of the room, including self. */
   peers: string[];
-  /** `peers` without self. */
-  remotePeers: string[];
-  /** Remote peers whose data channel is currently open. */
-  connectedPeers: string[];
-  /** Whether the signalling server connection is up. */
+  /**
+   * `peers` without self. Always set by `<Room>`; optional so custom
+   * providers written against 1.x still type-check (`useRoom` fills it in).
+   */
+  remotePeers?: string[];
+  /** Remote peers whose data channel is currently open. See `remotePeers`. */
+  connectedPeers?: string[];
+  /**
+   * Whether the signalling server connection is up. Once it drops the room
+   * does not reconnect: `peers` shrinks to self and every channel closes.
+   * Remount `<Room>` (e.g. change its React `key`) to join again.
+   */
   isConnected: boolean;
   broadcast: <TData extends JSONSerializable = JSONSerializable>(message: Message<TData>) => void;
   sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
@@ -23,8 +30,8 @@ export interface RoomContextValue {
     handler: MessageHandler<TData>
   ) => () => void;
   onPeerConnected: (handler: (remotePeerId: string) => void) => () => void;
-  /** Fires when an open data channel to a peer closes or the peer leaves. */
-  onPeerDisconnected: (handler: (remotePeerId: string) => void) => () => void;
+  /** Fires when an open data channel to a peer closes or the peer leaves. See `remotePeers`. */
+  onPeerDisconnected?: (handler: (remotePeerId: string) => void) => () => void;
   /**
    * Internal registry used by createSharedStore so every hook call in a Room
    * shares one store instance per key.
@@ -129,6 +136,9 @@ export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomP
 
       client.on('disconnected', () => {
         setIsConnected(false);
+        // Membership is unknown without signalling; don't report stale peers.
+        const self = client.getPeerId();
+        setPeers(self ? [self] : []);
         connectionsRef.current.forEach((conn) => {
           conn.close();
         });
