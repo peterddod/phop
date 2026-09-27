@@ -13,7 +13,7 @@
     "dev:server": "bun --filter=signalling-server dev",
     "dev:example": "bun --filter=example dev",
     "dev:lib": "bun --filter=@peterddod/phop dev",
-    "build": "bun run build --filter='./packages/*'",
+    "build": "bun --filter='./packages/*' run build",
     "build:lib": "bun --filter=@peterddod/phop run build",
     "build:server": "bun --filter=signalling-server run build",
     "build:example": "bun --filter=example run build",

@@ -11,11 +11,7 @@
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "react-jsx",
-    "erasableSyntaxOnly": true,
-    "baseUrl": ".",
-    "paths": {
-      "react-p2p": ["../react-p2p/src/index.ts"]
-    }
+    "erasableSyntaxOnly": true
   },
   "include": ["src"]
 }
