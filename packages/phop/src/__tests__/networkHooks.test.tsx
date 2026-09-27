@@ -230,6 +230,7 @@ describe('useHostedSimulation', () => {
     expect(simA.result.current.tick).toBeGreaterThan(5);
     expect(simB.result.current.tick).toBe(simA.result.current.tick);
     expect(simB.result.current.getState()).toEqual(simA.result.current.getState());
+    expect(simB.result.current.version).toBeGreaterThan(0);
 
     simA.unmount();
     simB.unmount();

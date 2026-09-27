@@ -280,6 +280,18 @@ describe('HostedSimulation', () => {
     expect(sims.a.getState().log).toEqual([]);
   });
 
+  it('stops stepping and broadcasting once isRunning is false', () => {
+    const { sims } = setup(['a', 'b'], { isRunning: (state) => state.count < 5 });
+    vi.advanceTimersByTime(3000);
+    expect(sims.a.getState().count).toBe(5);
+    const tick = sims.a.getTick();
+    const bVersion = sims.b.getVersion();
+    vi.advanceTimersByTime(2000);
+    expect(sims.a.getTick()).toBe(tick);
+    expect(sims.b.getVersion()).toBe(bVersion);
+    expect(sims.b.getState().count).toBe(5);
+  });
+
   it('notifies subscribers when the state changes', () => {
     const { sims } = setup(['a']);
     const listener = vi.fn();

@@ -52,6 +52,12 @@ export interface HostedSimulationOptions<TState, TInput> {
     toInput: (playerId: string, state: TState) => TInput | null;
   };
   /**
+   * Whether the simulation is still advancing. Once false (e.g. the match is
+   * over) the host stops stepping and broadcasting, so peers go quiet
+   * instead of re-rendering an unchanged state. Default: always running.
+   */
+  isRunning?: (state: TState) => boolean;
+  /**
    * Whether a player still counts as playing. Inactive players are ignored
    * by the cut-off guard and absence handling. Default: always active.
    */
@@ -412,6 +418,11 @@ export class HostedSimulation<TState, TInput> {
     }
 
     if (now() < this.graceUntil || this.awaitingHandoverChannel()) {
+      this.hold(t);
+      return;
+    }
+
+    if (this.options.isRunning && !this.options.isRunning(this.state)) {
       this.hold(t);
       return;
     }
