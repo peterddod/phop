@@ -1,8 +1,4 @@
 {
   "files": [],
-  "references": [
-    { "path": "./packages/react-p2p" },
-    { "path": "./packages/signalling-server" },
-    { "path": "./packages/example" }
-  ]
+  "references": [{ "path": "./packages/signalling-server" }, { "path": "./packages/example" }]
 }
