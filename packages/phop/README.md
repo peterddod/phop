@@ -178,7 +178,7 @@ Peers who connect once a match is running land in `in-progress`. Pass `validateC
 A host-authoritative, fixed-step simulation, suited to games. Every peer builds the same initial state. The elected host runs the loop, applies everyone's inputs and broadcasts snapshots, and the other peers forward their inputs and adopt the snapshots.
 
 ```ts
-const { getState, dispatch, tick, isHost, hostId } = useHostedSimulation<State, Command>('match', {
+const { getState, dispatch, tick, version, isHost, hostId } = useHostedSimulation<State, Command>('match', {
   players: match.players,              // frozen roster, including self
   init: () => createInitialState(seed), // must be deterministic
   step: (state, inputs, dt) => advance(state, inputs, dt), // mutate or return new state
@@ -186,6 +186,7 @@ const { getState, dispatch, tick, isHost, hostId } = useHostedSimulation<State, 
   validateState: isState,               // optional snapshot guard
   absence: { timeoutMs: 10_000, toInput: () => ({ type: 'resign' }) },
   isActive: (state, id) => !state.players[id]?.eliminated,
+  isRunning: (state) => state.status === 'running', // stop stepping once over
 });
 ```
 
