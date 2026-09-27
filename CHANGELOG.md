@@ -1,3 +1,15 @@
+# [1.6.0](https://github.com/peterddod/phop/compare/v1.5.0...v1.6.0) (2026-09-27)
+
+
+### Bug Fixes
+
+* **ci:** publish to npm with trusted publishing ([c099266](https://github.com/peterddod/phop/commit/c09926677225025e867631bd859dd9de4e818d4f))
+
+
+### Features
+
+* **phop:** add isRunning option and version counter to hosted simulation ([97ce304](https://github.com/peterddod/phop/commit/97ce304f4b15a58e2f809f8cae147a210d32828e))
+
 # [1.5.0](https://github.com/peterddod/phop/compare/v1.4.1...v1.5.0) (2026-09-27)
 
 
