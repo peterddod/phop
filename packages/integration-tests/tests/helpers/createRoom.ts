@@ -16,6 +16,8 @@ interface CreateRoomOptions {
    * Defaults to `peerCount` (i.e. a fresh room with only these peers).
    */
   expectedTotalPeers?: number;
+  /** Mount the lobby/simulation probe (`window.__game`). */
+  game?: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ export async function createRoom(
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL;
   const totalPeers = options.expectedTotalPeers ?? peerCount;
 
-  const url = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}`;
+  const url = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}${options.game ? '&game=1' : ''}`;
 
   const handles: PeerHandle[] = [];
 

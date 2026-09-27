@@ -49,6 +49,7 @@ Establishes a WebRTC mesh with all peers in the given room.
 |------|------|-------------|
 | `signallingServerUrl` | `string` | WebSocket URL of the signaling server |
 | `roomId` | `string` | Room identifier — peers sharing a room ID connect to each other |
+| `rtcConfig` | `RTCConfiguration?` | WebRTC config, e.g. TURN servers. Defaults to Google STUN |
 
 ### `useSharedState(key, initialValue, strategy?)`
 
@@ -114,8 +115,84 @@ A custom `MergeStrategy` can be passed via `options.strategy`. The default is a 
 Access room metadata and low-level messaging.
 
 ```ts
-const { peerId, peers, isConnected, broadcast, onMessage } = useRoom();
+const {
+  peerId,
+  peers,          // signalling membership, deduplicated, including self
+  remotePeers,    // peers without self
+  connectedPeers, // remote peers with an open data channel
+  isConnected,    // signalling connection is up (false after it drops)
+  broadcast,
+  sendToPeer,
+  onMessage,
+  onPeerConnected,
+  onPeerDisconnected,
+} = useRoom();
 ```
+
+### `useChannel(name, validate)`
+
+Typed, validated messaging on a named channel. Incoming data is untrusted: messages that fail `validate` are dropped, and the sender id always comes from the transport.
+
+```ts
+type Chat = { text: string };
+const isChat = (d: unknown): d is Chat =>
+  typeof d === 'object' && d !== null && typeof (d as Chat).text === 'string';
+
+const chat = useChannel('chat', isChat);
+useEffect(() => chat.subscribe((msg, senderId) => console.log(senderId, msg.text)), [chat]);
+chat.broadcast({ text: 'hi' });
+chat.send(peerId, { text: 'just you' });
+```
+
+`createChannel(room, name, validate)` does the same outside React.
+
+### `useHost(options?)`
+
+Deterministic host election: the lowest-sorted candidate currently in the room. Every peer agrees without exchanging messages, and the host moves on when it leaves.
+
+```ts
+const { hostId, isHost } = useHost();                       // anyone in the room
+const { hostId, isHost } = useHost({ candidates: roster }); // restricted
+```
+
+The pure `electHost`, `presentCandidates` and `isCutOff` helpers are exported too.
+
+### `useLobby(key?, options?)`
+
+A pre-match lobby. The lobby host starts the match, and every peer freezes the same roster.
+
+```tsx
+const { phase, players, isLobbyHost, start, match } = useLobby<{ seed: string }>();
+
+if (phase === 'in-progress') return <p>Match already started</p>;
+if (phase === 'lobby') return isLobbyHost ? <button onClick={() => start({ seed })}>Start</button> : <p>Waiting…</p>;
+return <Game players={match.players} seed={match.config.seed} />;
+```
+
+Peers who connect once a match is running land in `in-progress`. Pass `validateConfig` to guard the start config.
+
+### `useHostedSimulation(key, options)`
+
+A host-authoritative, fixed-step simulation, suited to games. Every peer builds the same initial state. The elected host runs the loop, applies everyone's inputs and broadcasts snapshots, and the other peers forward their inputs and adopt the snapshots.
+
+```ts
+const { getState, dispatch, tick, isHost, hostId } = useHostedSimulation<State, Command>('match', {
+  players: match.players,              // frozen roster, including self
+  init: () => createInitialState(seed), // must be deterministic
+  step: (state, inputs, dt) => advance(state, inputs, dt), // mutate or return new state
+  validateInput: isCommand,
+  validateState: isState,               // optional snapshot guard
+  absence: { timeoutMs: 10_000, toInput: () => ({ type: 'resign' }) },
+  isActive: (state, id) => !state.players[id]?.eliminated,
+});
+```
+
+- **Host migration.** When the host leaves, the next player takes over after a short grace period (`migrationGraceMs`, default 1000). A demoted host hands its state to the new host, so a returning host never rolls the match back.
+- **Cut-off guard.** A host that loses the signalling server, or sees every remaining rival vanish at once, pauses instead of simulating alone.
+- **Hidden tabs.** The loop runs on a worker timer, so it keeps going when the host's tab is hidden.
+- **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta` and `maxCatchUp`.
+
+`key`, `players` and `init` are read once per mount. Remount to start a new simulation. `HostedSimulation` is the same thing without React.
 
 ## Signaling Server
 

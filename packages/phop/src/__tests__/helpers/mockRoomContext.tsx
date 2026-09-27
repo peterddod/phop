@@ -13,11 +13,14 @@ export function createMockRoomContext(
     roomId: 'test-room',
     peerId,
     peers,
+    remotePeers: peers.filter((p) => p !== peerId),
+    connectedPeers: peers.filter((p) => p !== peerId),
     isConnected: true,
     broadcast: vi.fn(),
     sendToPeer: vi.fn(),
     onMessage: vi.fn(() => () => {}),
     onPeerConnected: vi.fn(() => () => {}),
+    onPeerDisconnected: vi.fn(() => () => {}),
     __internalStoreRegistry: new Map(),
   };
 

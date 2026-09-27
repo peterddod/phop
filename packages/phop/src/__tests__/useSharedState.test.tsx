@@ -77,11 +77,14 @@ describe('useSharedState', () => {
         roomId: 'test-room',
         peerId: 'peer-1',
         peers: ['peer-1'],
+        remotePeers: [],
+        connectedPeers: [],
         isConnected: true,
         broadcast,
         sendToPeer: vi.fn(),
         onMessage: vi.fn(() => () => {}),
         onPeerConnected: vi.fn(() => () => {}),
+        onPeerDisconnected: vi.fn(() => () => {}),
       } as RoomContextValue,
     };
 

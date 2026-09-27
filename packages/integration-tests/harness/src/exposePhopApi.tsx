@@ -42,6 +42,8 @@ const useLabelStore = createSharedStore<LabelState>('label', (set, get) => ({
 interface PhopApi {
   peerId: string;
   peers: string[];
+  remotePeers: string[];
+  connectedPeers: string[];
   isConnected: boolean;
   /** Number of peers with an open data channel (excludes self). */
   connectedPeerCount: number;
@@ -157,8 +159,17 @@ function ExposePhopApiInner({
   labelProbeEnabled,
   onEnableLabelProbe,
 }: ExposePhopApiInnerProps) {
-  const { peerId, peers, isConnected, broadcast, sendToPeer, onMessage, onPeerConnected } =
-    useRoom();
+  const {
+    peerId,
+    peers,
+    remotePeers,
+    connectedPeers,
+    isConnected,
+    broadcast,
+    sendToPeer,
+    onMessage,
+    onPeerConnected,
+  } = useRoom();
 
   const stateMapRef = useRef<Map<string, JSONSerializable | null>>(new Map());
   const settersRef = useRef<Map<string, SharedSetter>>(new Map());
@@ -200,6 +211,8 @@ function ExposePhopApiInner({
     const api: PhopApi = {
       peerId,
       peers,
+      remotePeers,
+      connectedPeers,
       isConnected,
       connectedPeerCount: connectedPeerCountRef.current,
 
@@ -330,6 +343,8 @@ function ExposePhopApiInner({
   }, [
     peerId,
     peers,
+    remotePeers,
+    connectedPeers,
     isConnected,
     broadcast,
     sendToPeer,
