@@ -199,6 +199,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [semantic-release, build-lib]
     if: needs.semantic-release.outputs.released == 'true' && needs.build-lib.result == 'success'
+    # Trusted publishing: npm exchanges the job's OIDC token, no NPM_TOKEN.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -210,6 +214,10 @@ jobs:
           node-version: "22.14.0"
           registry-url: "https://registry.npmjs.org"
 
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Update npm
+        run: npm install -g npm@^11.5.1
+
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
@@ -218,8 +226,6 @@ jobs:
 
       - name: Publish
         working-directory: packages/phop
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
   publish-docker:
