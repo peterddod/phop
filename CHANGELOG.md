@@ -1,3 +1,16 @@
+# [1.5.0](https://github.com/peterddod/phop/compare/v1.4.1...v1.5.0) (2026-09-27)
+
+
+### Bug Fixes
+
+* **build:** repair root and example build scripts ([8dd3b7e](https://github.com/peterddod/phop/commit/8dd3b7eec45d74e65511bb3a72a157707d4c6b6d))
+* **phop:** harden handover, lobby trust and disconnect handling ([51fbcfb](https://github.com/peterddod/phop/commit/51fbcfb93e4976aad087607491ac7ef9d3afc61e))
+
+
+### Features
+
+* **phop:** add host-authoritative networking primitives ([c1a7f99](https://github.com/peterddod/phop/commit/c1a7f994ea3257c7acca433f2c0e5a0b1f7566a9))
+
 ## [1.4.1](https://github.com/peterddod/phop/compare/v1.4.0...v1.4.1) (2026-03-26)
 
 
