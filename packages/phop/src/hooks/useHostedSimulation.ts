@@ -10,6 +10,12 @@ export interface UseHostedSimulationResult<TState, TInput> {
   dispatch: (input: TInput) => void;
   /** Current simulation tick. */
   tick: number;
+  /**
+   * Increments on every state change (each stepping frame, each adopted
+   * snapshot). Unlike `tick` it never repeats or goes back, so it suits
+   * effect dependencies and throttles.
+   */
+  version: number;
   isHost: boolean;
   hostId: string | null;
 }
@@ -41,13 +47,14 @@ export function useHostedSimulation<TState, TInput>(
     return () => sim.stop();
   }, [sim]);
 
-  useSyncExternalStore(sim.subscribe, sim.getVersion, sim.getVersion);
+  const version = useSyncExternalStore(sim.subscribe, sim.getVersion, sim.getVersion);
 
   const hostId = electHost(players, presentCandidates(players, room.peerId, room.peers));
   return {
     getState: sim.getState,
     dispatch: sim.dispatch,
     tick: sim.getTick(),
+    version,
     isHost: hostId !== null && hostId === room.peerId,
     hostId,
   };
