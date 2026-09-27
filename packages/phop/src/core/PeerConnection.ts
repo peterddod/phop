@@ -12,6 +12,7 @@ export interface PeerConnectionOptions {
   rtcConfig?: RTCConfiguration;
   onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
   onChannelOpen?: (remotePeerId: string) => void;
+  onChannelClose?: (remotePeerId: string) => void;
 }
 
 class PeerConnection {
@@ -24,6 +25,7 @@ class PeerConnection {
   private signalingClient: SignalingClient;
   private onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
   private onChannelOpen?: (remotePeerId: string) => void;
+  private onChannelClose?: (remotePeerId: string) => void;
 
   constructor(opts: PeerConnectionOptions) {
     this.selfPeerId = opts.localPeerId;
@@ -31,6 +33,7 @@ class PeerConnection {
     this.signalingClient = opts.signalingClient;
     this.onChannelMessage = opts.onChannelMessage;
     this.onChannelOpen = opts.onChannelOpen;
+    this.onChannelClose = opts.onChannelClose;
 
     this.pc = new RTCPeerConnection(
       opts.rtcConfig ?? { iceServers: PeerConnection.DEFAULT_ICE_SERVERS }
@@ -120,6 +123,7 @@ class PeerConnection {
 
     channel.onclose = () => {
       console.log(`Data channel closed to ${this.remotePeerId}`);
+      this.onChannelClose?.(this.remotePeerId);
     };
 
     channel.onerror = (error) => {

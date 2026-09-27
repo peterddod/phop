@@ -14,6 +14,7 @@ class SignalingClient {
   private ws: WebSocket | null = null;
   private eventHandlers: Map<string, SignalingEventHandler[]> = new Map();
   private peerId: string = '';
+  private closedIntentionally = false;
 
   constructor(
     private serverUrl: string,
@@ -22,6 +23,7 @@ class SignalingClient {
 
   connect(): Promise<string> {
     return new Promise((resolve, reject) => {
+      this.closedIntentionally = false;
       this.ws = new WebSocket(this.serverUrl);
 
       this.ws.onopen = () => {
@@ -48,6 +50,9 @@ class SignalingClient {
 
       this.ws.onclose = () => {
         console.log('Disconnected from signaling server');
+        if (!this.closedIntentionally) {
+          this.emit({ type: 'disconnected' });
+        }
       };
     });
   }
@@ -92,6 +97,7 @@ class SignalingClient {
   }
 
   disconnect(): void {
+    this.closedIntentionally = true;
     this.ws?.close();
     this.ws = null;
   }

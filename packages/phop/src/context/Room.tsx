@@ -1,4 +1,4 @@
-import { createContext, useCallback, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PeerConnection } from '../core/PeerConnection';
 import { SignalingClient } from '../core/SignalingClient';
 import type { JSONSerializable, Message, MessageHandler } from '../types';
@@ -6,7 +6,20 @@ import type { JSONSerializable, Message, MessageHandler } from '../types';
 export interface RoomContextValue {
   roomId: string;
   peerId: string;
+  /** Deduplicated signalling membership of the room, including self. */
   peers: string[];
+  /**
+   * `peers` without self. Always set by `<Room>`; optional so custom
+   * providers written against 1.x still type-check (`useRoom` fills it in).
+   */
+  remotePeers?: string[];
+  /** Remote peers whose data channel is currently open. See `remotePeers`. */
+  connectedPeers?: string[];
+  /**
+   * Whether the signalling server connection is up. Once it drops the room
+   * does not reconnect: `peers` shrinks to self and every channel closes.
+   * Remount `<Room>` (e.g. change its React `key`) to join again.
+   */
   isConnected: boolean;
   broadcast: <TData extends JSONSerializable = JSONSerializable>(message: Message<TData>) => void;
   sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
@@ -17,6 +30,8 @@ export interface RoomContextValue {
     handler: MessageHandler<TData>
   ) => () => void;
   onPeerConnected: (handler: (remotePeerId: string) => void) => () => void;
+  /** Fires when an open data channel to a peer closes or the peer leaves. See `remotePeers`. */
+  onPeerDisconnected?: (handler: (remotePeerId: string) => void) => () => void;
   /**
    * Internal registry used by createSharedStore so every hook call in a Room
    * shares one store instance per key.
@@ -29,23 +44,47 @@ export const RoomContext = createContext<RoomContextValue | null>(null);
 interface RoomProps extends React.PropsWithChildren {
   signallingServerUrl: string;
   roomId: string;
+  /** WebRTC configuration, e.g. to add TURN servers. Defaults to Google STUN. */
+  rtcConfig?: RTCConfiguration;
 }
 
-export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
+function dedupe(ids: string[]): string[] {
+  return Array.from(new Set(ids));
+}
+
+export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomProps) {
   const [peerId, setPeerId] = useState<string>('');
   const [peers, setPeers] = useState<string[]>([]);
+  const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const signalingClientRef = useRef<SignalingClient | null>(null);
   const connectionsRef = useRef<Map<string, PeerConnection>>(new Map());
   const handlersRef = useRef<Set<MessageHandler>>(new Set());
   const peerConnectedHandlersRef = useRef<Set<(remotePeerId: string) => void>>(new Set());
+  const peerDisconnectedHandlersRef = useRef<Set<(remotePeerId: string) => void>>(new Set());
+  const connectedRef = useRef<Set<string>>(new Set());
+  const rtcConfigRef = useRef(rtcConfig);
+  rtcConfigRef.current = rtcConfig;
   const internalStoreRegistriesRef = useRef<Map<string, Map<string, unknown>>>(new Map());
   let internalStoreRegistry = internalStoreRegistriesRef.current.get(roomId);
   if (!internalStoreRegistry) {
     internalStoreRegistry = new Map<string, unknown>();
     internalStoreRegistriesRef.current.set(roomId, internalStoreRegistry);
   }
+
+  const markConnected = useCallback((remotePeerId: string) => {
+    if (connectedRef.current.has(remotePeerId)) return;
+    connectedRef.current.add(remotePeerId);
+    setConnectedPeers(Array.from(connectedRef.current));
+    peerConnectedHandlersRef.current.forEach((h) => void h(remotePeerId));
+  }, []);
+
+  const markDisconnected = useCallback((remotePeerId: string) => {
+    if (!connectedRef.current.delete(remotePeerId)) return;
+    setConnectedPeers(Array.from(connectedRef.current));
+    peerDisconnectedHandlersRef.current.forEach((h) => void h(remotePeerId));
+  }, []);
 
   useEffect(
     function initializeSignalingClient() {
@@ -58,19 +97,19 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
           setIsConnected(true);
         }
         if (event.peers) {
-          setPeers(event.peers);
+          setPeers(dedupe(event.peers));
         }
       });
 
       client.on('peer-list', (event) => {
         if (event.peers) {
-          setPeers(event.peers);
+          setPeers(dedupe(event.peers));
         }
       });
 
       client.on('peer-joined', (event) => {
         if (event.peers) {
-          setPeers(event.peers);
+          setPeers(dedupe(event.peers));
         }
       });
 
@@ -81,9 +120,10 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
             connection.close();
             connectionsRef.current.delete(event.peerId);
           }
+          markDisconnected(event.peerId);
         }
         if (event.peers) {
-          setPeers(event.peers);
+          setPeers(dedupe(event.peers));
         }
       });
 
@@ -96,10 +136,16 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
 
       client.on('disconnected', () => {
         setIsConnected(false);
+        // Membership is unknown without signalling; don't report stale peers.
+        const self = client.getPeerId();
+        setPeers(self ? [self] : []);
         connectionsRef.current.forEach((conn) => {
           conn.close();
         });
         connectionsRef.current.clear();
+        connectedRef.current.forEach((id) => {
+          markDisconnected(id);
+        });
       });
 
       client.connect().catch((error) => {
@@ -112,10 +158,12 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
           conn.close();
         });
         connectionsRef.current.clear();
+        connectedRef.current.clear();
+        setConnectedPeers([]);
         client.disconnect();
       };
     },
-    [signallingServerUrl, roomId]
+    [signallingServerUrl, roomId, markDisconnected]
   );
 
   useEffect(
@@ -133,6 +181,7 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
           localPeerId: peerId,
           remotePeerId,
           signalingClient,
+          rtcConfig: rtcConfigRef.current,
           onChannelMessage: (fromPeerId, raw) => {
             const message: Message<JSONSerializable> = {
               senderId: fromPeerId,
@@ -151,7 +200,12 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
             handlersRef.current.forEach((h) => void h(message));
           },
           onChannelOpen: (connectedRemotePeerId) => {
-            peerConnectedHandlersRef.current.forEach((h) => void h(connectedRemotePeerId));
+            if (connectionsRef.current.get(connectedRemotePeerId) !== connection) return;
+            markConnected(connectedRemotePeerId);
+          },
+          onChannelClose: (closedRemotePeerId) => {
+            if (connectionsRef.current.get(closedRemotePeerId) !== connection) return;
+            markDisconnected(closedRemotePeerId);
           },
         });
 
@@ -162,10 +216,11 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
         if (!peers.includes(remotePeerId)) {
           connection.close();
           connectionsRef.current.delete(remotePeerId);
+          markDisconnected(remotePeerId);
         }
       });
     },
-    [peers, peerId]
+    [peers, peerId, markConnected, markDisconnected]
   );
 
   const broadcast = useCallback(<TData extends JSONSerializable>(message: Message<TData>): void => {
@@ -201,15 +256,30 @@ export function Room({ children, signallingServerUrl, roomId }: RoomProps) {
     };
   }, []);
 
+  const onPeerDisconnected = useCallback(
+    (handler: (remotePeerId: string) => void): (() => void) => {
+      peerDisconnectedHandlersRef.current.add(handler);
+      return () => {
+        peerDisconnectedHandlersRef.current.delete(handler);
+      };
+    },
+    []
+  );
+
+  const remotePeers = useMemo(() => peers.filter((p) => p !== peerId), [peers, peerId]);
+
   const contextValue: RoomContextValue = {
     roomId,
     peerId,
     peers,
+    remotePeers,
+    connectedPeers,
     isConnected,
     broadcast,
     sendToPeer,
     onMessage,
     onPeerConnected,
+    onPeerDisconnected,
     __internalStoreRegistry: internalStoreRegistry,
   };
 

@@ -1,10 +1,12 @@
 import { Room } from '@peterddod/phop';
 import { createRoot } from 'react-dom/client';
 import { ExposePhopApi } from './exposePhopApi';
+import { GameProbe } from './gameProbe';
 
 const params = new URLSearchParams(window.location.search);
 const roomId = params.get('roomId') ?? 'default-room';
 const serverUrl = params.get('serverUrl') ?? 'ws://localhost:8080';
+const withGame = params.get('game') === '1';
 
 const rootElement = document.getElementById('root');
 
@@ -15,5 +17,6 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <Room signallingServerUrl={serverUrl} roomId={roomId}>
     <ExposePhopApi />
+    {withGame && <GameProbe />}
   </Room>
 );
