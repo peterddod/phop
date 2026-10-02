@@ -5,6 +5,7 @@ import {
   createSharedStore,
   type JSONSerializable,
   type MergeStrategy,
+  type PeerInfo,
   useRoom,
   useSharedState,
 } from '@peterddod/phop';
@@ -44,6 +45,8 @@ interface PhopApi {
   peers: string[];
   remotePeers: string[];
   connectedPeers: string[];
+  /** Each peer's protocol version and metadata. */
+  peerInfo: Record<string, PeerInfo>;
   isConnected: boolean;
   /** Number of peers with an open data channel (excludes self). */
   connectedPeerCount: number;
@@ -164,6 +167,7 @@ function ExposePhopApiInner({
     peers,
     remotePeers,
     connectedPeers,
+    peerInfo,
     isConnected,
     broadcast,
     sendToPeer,
@@ -213,6 +217,7 @@ function ExposePhopApiInner({
       peers,
       remotePeers,
       connectedPeers,
+      peerInfo,
       isConnected,
       connectedPeerCount: connectedPeerCountRef.current,
 
@@ -345,6 +350,7 @@ function ExposePhopApiInner({
     peers,
     remotePeers,
     connectedPeers,
+    peerInfo,
     isConnected,
     broadcast,
     sendToPeer,

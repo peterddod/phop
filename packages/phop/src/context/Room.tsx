@@ -5,6 +5,12 @@ import {
   type SignalingSession,
   webRtcTransport,
 } from '../core/transport';
+import {
+  normalizeMetadata,
+  type PeerInfo,
+  type PeerMetadata,
+  PROTOCOL_VERSION,
+} from '../core/wire';
 import type { JSONSerializable, Message, MessageHandler, SendOptions } from '../types';
 
 export interface RoomContextValue {
@@ -30,6 +36,13 @@ export interface RoomContextValue {
   remotePeers?: string[];
   /** Remote peers whose data channel is currently open. See `remotePeers`. */
   connectedPeers?: string[];
+  /**
+   * Each peer's protocol version and metadata (see `<Room metadata>`), by
+   * peer id: self, and every remote peer in the room whose hello has
+   * arrived, incompatible ones included. Always set by `<Room>`; optional
+   * for custom providers (`useRoom` fills it in).
+   */
+  peerInfo?: Record<string, PeerInfo>;
   /**
    * Whether the signalling server connection is up. Once it drops the room
    * does not reconnect: `peers` shrinks to self and every channel closes.
@@ -81,10 +94,29 @@ interface RoomProps extends React.PropsWithChildren {
    * Read once per `signallingServerUrl`/`roomId`.
    */
   transport?: RoomTransport;
+  /**
+   * Small JSON object every peer in the room sees as `peerInfo[peerId].metadata`,
+   * e.g. `{ buildId, name }`; at most `MAX_METADATA_LENGTH` characters as
+   * JSON. Changes are sent to peers already connected (compared by value,
+   * so a new object each render is fine). Invalid metadata is logged and
+   * not published.
+   */
+  metadata?: PeerMetadata;
 }
 
 function dedupe(ids: string[]): string[] {
   return Array.from(new Set(ids));
+}
+
+/** `metadata` as JSON text, to compare by value; '' for none or unserialisable. */
+function metadataText(metadata: unknown): string {
+  if (metadata === undefined) return '';
+  try {
+    return JSON.stringify(metadata) ?? '';
+  } catch (error) {
+    console.error('phop: metadata is not serialisable:', error);
+    return '';
+  }
 }
 
 function logSendFailure(peerId: string, error: unknown) {
@@ -98,12 +130,27 @@ export function Room({
   rtcConfig,
   maxBufferedAmount,
   transport = webRtcTransport,
+  metadata,
 }: RoomProps) {
   const [peerId, setPeerId] = useState<string>('');
   const [peers, setPeers] = useState<string[]>([]);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [incompatible, setIncompatible] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [remoteInfo, setRemoteInfo] = useState<Record<string, PeerInfo>>({});
+
+  const ownMetadataText = metadataText(metadata);
+  const ownMetadata = useMemo((): PeerMetadata | null => {
+    if (!ownMetadataText) return null;
+    try {
+      return normalizeMetadata(JSON.parse(ownMetadataText));
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  }, [ownMetadataText]);
+  const ownMetadataRef = useRef(ownMetadata);
+  ownMetadataRef.current = ownMetadata;
 
   const signalingClientRef = useRef<SignalingSession | null>(null);
   const connectionsRef = useRef<Map<string, PeerLink>>(new Map());
@@ -212,6 +259,7 @@ export function Room({
         connectedRef.current.clear();
         setConnectedPeers([]);
         setIncompatible([]);
+        setRemoteInfo({});
         client.disconnect();
       };
     },
@@ -235,6 +283,7 @@ export function Room({
           signalingClient,
           rtcConfig: rtcConfigRef.current,
           maxBufferedAmount: maxBufferedAmountRef.current,
+          metadata: ownMetadataRef.current,
           onChannelMessage: (fromPeerId, raw) => {
             const message: Message<JSONSerializable> = {
               senderId: fromPeerId,
@@ -264,6 +313,10 @@ export function Room({
             if (connectionsRef.current.get(foreignPeerId) !== connection) return;
             setIncompatible((ids) => (ids.includes(foreignPeerId) ? ids : [...ids, foreignPeerId]));
           },
+          onPeerInfo: (infoPeerId, info) => {
+            if (connectionsRef.current.get(infoPeerId) !== connection) return;
+            setRemoteInfo((all) => ({ ...all, [infoPeerId]: info }));
+          },
         });
 
         connectionsRef.current.set(remotePeerId, connection);
@@ -280,8 +333,29 @@ export function Room({
         const present = ids.filter((id) => peers.includes(id));
         return present.length === ids.length ? ids : present;
       });
+      setRemoteInfo((all) => {
+        const gone = Object.keys(all).filter((id) => !peers.includes(id));
+        if (gone.length === 0) return all;
+        const kept = { ...all };
+        for (const id of gone) delete kept[id];
+        return kept;
+      });
     },
     [peers, peerId, markConnected, markDisconnected]
+  );
+
+  useEffect(
+    function publishMetadata() {
+      // New links take it from the ref; tell the open ones.
+      connectionsRef.current.forEach((connection, remotePeerId) => {
+        try {
+          connection.setMetadata?.(ownMetadata);
+        } catch (error) {
+          logSendFailure(remotePeerId, error);
+        }
+      });
+    },
+    [ownMetadata]
   );
 
   const broadcast = useCallback(
@@ -355,6 +429,11 @@ export function Room({
     [compatiblePeers, peerId]
   );
 
+  const peerInfo = useMemo((): Record<string, PeerInfo> => {
+    if (!peerId) return remoteInfo;
+    return { ...remoteInfo, [peerId]: { protocol: PROTOCOL_VERSION, metadata: ownMetadata } };
+  }, [remoteInfo, peerId, ownMetadata]);
+
   const contextValue: RoomContextValue = {
     roomId,
     peerId,
@@ -362,6 +441,7 @@ export function Room({
     remotePeers,
     incompatiblePeers: incompatible,
     connectedPeers,
+    peerInfo,
     isConnected,
     broadcast,
     sendToPeer,

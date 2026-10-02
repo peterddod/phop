@@ -1,4 +1,4 @@
-import type { SendOptions } from '../types';
+import type { JSONSerializable, SendOptions } from '../types';
 
 /**
  * Framing between a room and a data channel: a protocol handshake, deflate
@@ -9,7 +9,11 @@ import type { SendOptions } from '../types';
  * Each side's first frame is a hello naming its protocol version
  * (`{"phop":2,"deflate":true,"ack":false}`; see `WireLink`); a peer on
  * another version, or one whose first frame to arrive is anything else
- * (phop 1.x had no hello), is incompatible and ignored from then on.
+ * (phop 1.x had no hello), is incompatible and ignored from then on. A hello
+ * may also carry the sender's metadata (`"meta":{...}`, see `PeerMetadata`),
+ * and is sent again when it changes. The hello's `phop` and `meta` fields
+ * keep their meaning in every version, so peers on different versions still
+ * learn each other's version and metadata.
  *
  * A message is sent as its JSON text. One too large for a single send goes
  * as chunk frames: `CHUNK_MARK id,index,count,` followed by part of the text.
@@ -30,6 +34,44 @@ import type { SendOptions } from '../types';
  * frames and hosted-simulation snapshot deltas.
  */
 export const PROTOCOL_VERSION = 2;
+
+/** A peer's metadata: a small JSON object it publishes to the room. */
+export type PeerMetadata = { [key: string]: JSONSerializable };
+
+/** What a peer's hello told us about it. */
+export interface PeerInfo<TMeta extends PeerMetadata = PeerMetadata> {
+  /** Its wire protocol version (1 for phop 1.x, which had no hello). */
+  protocol: number;
+  /** Its metadata, or null if it published none (or none that passed validation). */
+  metadata: TMeta | null;
+}
+
+/** Longest metadata, as JSON text in UTF-16 units. */
+export const MAX_METADATA_LENGTH = 1024;
+// Room for the hello's other fields around the metadata.
+const MAX_HELLO_LENGTH = MAX_METADATA_LENGTH + 256;
+
+function isMetadata(value: unknown): value is PeerMetadata {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `metadata` as it goes on the wire: a JSON object of at most
+ * `MAX_METADATA_LENGTH` characters, with `undefined` fields dropped. Throws
+ * a `TypeError` for anything else.
+ */
+export function normalizeMetadata(metadata: unknown): PeerMetadata {
+  const text = JSON.stringify(metadata);
+  if (!isMetadata(metadata) || text === undefined) {
+    throw new TypeError('phop: metadata must be a JSON object');
+  }
+  if (text.length > MAX_METADATA_LENGTH) {
+    throw new TypeError(
+      `phop: metadata is ${text.length} characters as JSON; the limit is ${MAX_METADATA_LENGTH}`
+    );
+  }
+  return JSON.parse(text) as PeerMetadata;
+}
 
 /** SCTP's maximum message size where the transport doesn't report one. */
 export const DEFAULT_MAX_MESSAGE_SIZE = 256 * 1024;
@@ -506,12 +548,20 @@ interface Hello {
   deflate?: unknown;
   /** The sender has the receiver's hello. */
   ack?: unknown;
+  /** The sender's metadata. */
+  meta?: unknown;
 }
 
 const HELLO_PREFIX = '{"phop":';
 
 function parseHello(frame: unknown): Hello | null {
-  if (typeof frame !== 'string' || !frame.startsWith(HELLO_PREFIX)) return null;
+  if (
+    typeof frame !== 'string' ||
+    frame.length > MAX_HELLO_LENGTH ||
+    !frame.startsWith(HELLO_PREFIX)
+  ) {
+    return null;
+  }
   try {
     const hello: unknown = JSON.parse(frame);
     if (typeof hello !== 'object' || hello === null) return null;
@@ -537,6 +587,13 @@ export interface WireLinkOptions {
    * is sent to it or taken from it.
    */
   onIncompatible?: (protocol: number) => void;
+  /**
+   * A hello arrived (from a compatible peer or not), or the peer turned out
+   * to be phop 1.x. Called again whenever the peer's metadata changes.
+   */
+  onPeerInfo?: (info: PeerInfo) => void;
+  /** Our metadata for the hello, already through `normalizeMetadata`. */
+  metadata?: PeerMetadata | null;
   /** The version we speak. Default `PROTOCOL_VERSION`; others are for tests. */
   protocol?: number;
 }
@@ -550,6 +607,12 @@ export interface WireLinkOptions {
  * acknowledged: a hello without `ack` is answered with one that has it, and
  * messages are held until the peer's hello arrives. A v2 peer's first frame
  * to arrive is therefore always a hello; anything else means phop 1.x.
+ *
+ * Metadata rides on the hello; `setMetadata` sends it again as an
+ * acknowledged hello, which releases before metadata existed ignore, so it
+ * needed no new protocol version. Hellos from an incompatible peer are still
+ * read for its metadata. Metadata over `MAX_METADATA_LENGTH`, or not an
+ * object, reads as none.
  */
 export class WireLink {
   private readonly outbox: Outbox;
@@ -557,11 +620,16 @@ export class WireLink {
   private readonly protocol: number;
   private helloSent = false;
   private peer: 'unknown' | 'compatible' | 'incompatible' = 'unknown';
+  private peerProtocol = 0;
+  private metadata: PeerMetadata | null;
+  // The peer's metadata as last reported, to report changes only.
+  private peerMetadataText: string | undefined;
   // Messages sent before the peer's hello arrived.
   private pending: { text: string; options?: SendOptions }[] = [];
 
   constructor(private readonly options: WireLinkOptions) {
     this.protocol = options.protocol ?? PROTOCOL_VERSION;
+    this.metadata = options.metadata ?? null;
     this.outbox = new Outbox(options.channel, options.maxBufferedAmount, options.maxMessageSize);
     this.inbox = createInbox(options.onMessage);
   }
@@ -575,7 +643,33 @@ export class WireLink {
   private sendHello(ack: boolean): void {
     this.helloSent = true;
     const hello: Hello = { phop: this.protocol, deflate: canInflate(), ack };
+    if (this.metadata) hello.meta = this.metadata;
     this.options.channel.send(JSON.stringify(hello));
+  }
+
+  /**
+   * Replace our metadata (already through `normalizeMetadata`) and tell the
+   * peer, unless our hello hasn't gone yet (it will carry it) or the peer is
+   * phop 1.x. May throw if the channel refuses it.
+   */
+  setMetadata(metadata: PeerMetadata | null): void {
+    this.metadata = metadata;
+    if (!this.helloSent || this.peerProtocol === 1) return;
+    // Acknowledged, so a compatible peer doesn't answer it.
+    this.sendHello(this.peer !== 'unknown');
+  }
+
+  private notePeer(protocol: number, hello: Hello | null): void {
+    let metadata = hello && isMetadata(hello.meta) ? hello.meta : null;
+    let text = metadata ? JSON.stringify(metadata) : '';
+    if (text.length > MAX_METADATA_LENGTH) {
+      metadata = null;
+      text = '';
+    }
+    if (protocol === this.peerProtocol && text === this.peerMetadataText) return;
+    this.peerProtocol = protocol;
+    this.peerMetadataText = text;
+    this.options.onPeerInfo?.({ protocol, metadata });
   }
 
   /**
@@ -602,19 +696,26 @@ export class WireLink {
   }
 
   receive = (frame: unknown): void => {
-    if (this.peer === 'incompatible') return;
     const hello = parseHello(frame);
+    if (this.peer === 'incompatible') {
+      if (hello && this.peerProtocol > 1) this.notePeer(this.peerProtocol, hello);
+      return;
+    }
     if (this.peer === 'compatible') {
-      // A repeated hello (an acknowledgement) is not a message.
+      // A repeated hello (an acknowledgement or new metadata) is not a
+      // message, nor is an oversized one.
       if (hello) {
+        this.notePeer(this.protocol, hello);
         if (hello.ack !== true) this.sendHello(true);
         return;
       }
+      if (typeof frame === 'string' && frame.startsWith(HELLO_PREFIX)) return;
       this.inbox(frame);
       return;
     }
     if (hello?.phop === this.protocol) {
       this.peer = 'compatible';
+      this.notePeer(hello.phop, hello);
       this.outbox.compress = hello.deflate === true;
       // Our hello may have been lost (or never sent, if no open event reached
       // us): answer one that doesn't have it yet.
@@ -637,6 +738,7 @@ export class WireLink {
     console.warn(
       `phop: a peer speaks protocol ${protocol}, this build speaks ${this.protocol}; ignoring it`
     );
+    this.notePeer(protocol, hello);
     this.options.onIncompatible?.(protocol);
   };
 }

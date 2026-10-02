@@ -5,7 +5,7 @@ import { Room } from '../context/Room';
 import type { PlayerInput } from '../core/HostedSimulation';
 import { createMemoryNetwork } from '../core/MemoryTransport';
 import type { RoomTransport } from '../core/transport';
-import { PROTOCOL_VERSION } from '../core/wire';
+import { MAX_METADATA_LENGTH, type PeerMetadata, PROTOCOL_VERSION } from '../core/wire';
 import { useHostedSimulation } from '../hooks/useHostedSimulation';
 import { type UseLobbyResult, useLobby } from '../hooks/useLobby';
 import { type RoomApi, useRoom } from '../hooks/useRoom';
@@ -145,6 +145,101 @@ describe('memory transport', () => {
       expect.stringContaining('send to peer-0002 failed'),
       expect.any(Error)
     );
+  });
+});
+
+// ---------------------------------------------------------------------
+// Peer metadata
+// ---------------------------------------------------------------------
+
+type Build = { buildId: string; name?: string };
+const isBuild = (d: unknown): d is Build =>
+  typeof d === 'object' && d !== null && typeof (d as Build).buildId === 'string';
+
+interface MetaProbe {
+  room: RoomApi | null;
+  lobby: UseLobbyResult<undefined, Build> | null;
+}
+
+function MetaProbeView({ probe }: { probe: MetaProbe }) {
+  probe.room = useRoom();
+  probe.lobby = useLobby<undefined, Build>('lobby', { validateMetadata: isBuild });
+  return null;
+}
+
+function metaRoom(transport: RoomTransport, probe: MetaProbe, metadata?: PeerMetadata) {
+  return (
+    <Room signallingServerUrl="memory" roomId="meta" transport={transport} metadata={metadata}>
+      <MetaProbeView probe={probe} />
+    </Room>
+  );
+}
+
+describe('peer metadata over the memory transport', () => {
+  it('shows every peer its own and the others’ metadata, and propagates changes', async () => {
+    const net = createMemoryNetwork();
+    const a: MetaProbe = { room: null, lobby: null };
+    const b: MetaProbe = { room: null, lobby: null };
+    render(metaRoom(net.transport, a, { buildId: '1', name: 'Ann' }));
+    const bView = render(metaRoom(net.transport, b, { buildId: '1' }));
+    await waitFor(() => {
+      for (const p of [a, b]) expect(Object.keys(p.room?.peerInfo ?? {})).toHaveLength(2);
+    });
+    expect(b.room?.peerInfo['peer-0001']).toEqual({
+      protocol: PROTOCOL_VERSION,
+      metadata: { buildId: '1', name: 'Ann' },
+    });
+    expect(a.room?.peerInfo['peer-0001'].metadata).toEqual({ buildId: '1', name: 'Ann' });
+    expect(a.lobby?.peerInfo['peer-0002'].metadata).toEqual({ buildId: '1' });
+
+    // A new object with the same value changes nothing; a new value propagates.
+    const before = a.room?.peerInfo;
+    bView.rerender(metaRoom(net.transport, b, { buildId: '1' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(a.room?.peerInfo).toBe(before);
+    bView.rerender(metaRoom(net.transport, b, { buildId: '2' }));
+    await waitFor(() => expect(a.room?.peerInfo['peer-0002'].metadata).toEqual({ buildId: '2' }));
+
+    // Metadata failing the lobby's validator reads as null there only.
+    bView.rerender(metaRoom(net.transport, b, { other: true }));
+    await waitFor(() => expect(a.room?.peerInfo['peer-0002'].metadata).toEqual({ other: true }));
+    expect(a.lobby?.peerInfo['peer-0002'].metadata).toBeNull();
+
+    // A peer that leaves leaves `peerInfo`.
+    bView.unmount();
+    await waitFor(() => expect(Object.keys(a.room?.peerInfo ?? {})).toEqual(['peer-0001']));
+  });
+
+  it('shows the version and metadata of a peer on another protocol', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const net = createMemoryNetwork({
+      protocolOf: (joinIndex) => (joinIndex === 2 ? PROTOCOL_VERSION + 1 : PROTOCOL_VERSION),
+    });
+    const a: MetaProbe = { room: null, lobby: null };
+    const b: MetaProbe = { room: null, lobby: null };
+    render(metaRoom(net.transport, a, { buildId: '1' }));
+    render(metaRoom(net.transport, b, { buildId: '2' }));
+    await waitFor(() => {
+      expect(a.room?.incompatiblePeers).toEqual(['peer-0002']);
+      expect(a.lobby?.peerInfo['peer-0002']).toEqual({
+        protocol: PROTOCOL_VERSION + 1,
+        metadata: { buildId: '2' },
+      });
+    });
+    expect(a.lobby?.players).toEqual(['peer-0001']);
+  });
+
+  it('publishes no metadata that is too large', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const net = createMemoryNetwork();
+    const a: MetaProbe = { room: null, lobby: null };
+    const b: MetaProbe = { room: null, lobby: null };
+    render(metaRoom(net.transport, a, { buildId: 'x'.repeat(MAX_METADATA_LENGTH) }));
+    render(metaRoom(net.transport, b));
+    await waitFor(() => expect(b.room?.peerInfo['peer-0001']).toBeDefined());
+    expect(b.room?.peerInfo['peer-0001'].metadata).toBeNull();
+    expect(a.room?.peerInfo['peer-0001'].metadata).toBeNull();
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ name: 'TypeError' }));
   });
 });
 

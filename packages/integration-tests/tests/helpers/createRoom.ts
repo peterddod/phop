@@ -18,6 +18,8 @@ interface CreateRoomOptions {
   expectedTotalPeers?: number;
   /** Mount the lobby/simulation probe (`window.__game`). */
   game?: boolean;
+  /** `<Room metadata>` for each spawned peer, by spawn index. */
+  metadata?: (index: number) => Record<string, unknown>;
 }
 
 /**
@@ -42,14 +44,17 @@ export async function createRoom(
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL;
   const totalPeers = options.expectedTotalPeers ?? peerCount;
 
-  const url = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}${options.game ? '&game=1' : ''}`;
+  const baseUrl = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}${options.game ? '&game=1' : ''}`;
 
   const handles: PeerHandle[] = [];
 
   for (let i = 0; i < peerCount; i++) {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(url);
+    const metadata = options.metadata?.(i);
+    await page.goto(
+      metadata ? `${baseUrl}&meta=${encodeURIComponent(JSON.stringify(metadata))}` : baseUrl
+    );
 
     // Wait for window.__phop to be initialised before handing the handle back.
     await page.waitForFunction(

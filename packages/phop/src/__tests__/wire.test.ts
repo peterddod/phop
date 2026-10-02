@@ -7,8 +7,12 @@ import {
   encodeBinaryFrames,
   encodeFrames,
   FrameReassembler,
+  MAX_METADATA_LENGTH,
   maxMessageSizeOf,
+  normalizeMetadata,
   Outbox,
+  type PeerInfo,
+  type PeerMetadata,
   PROTOCOL_VERSION,
   utf8Length,
   WireLink,
@@ -333,5 +337,106 @@ describe('wire link', () => {
     const out = frames.map((f) => reassembler.push(f));
     expect(Array.from(out[out.length - 1] ?? [])).toEqual(Array.from(bytes));
     expect(reassembler.push(new Uint8Array([2, 0, 0]))).toBeNull();
+  });
+});
+
+/** Two wire links with metadata, joined like `linkPair`, recording what each learns of the other. */
+function metadataPair(meta: { a?: PeerMetadata; b?: PeerMetadata; protocolB?: number } = {}) {
+  const infos: { a: PeerInfo[]; b: PeerInfo[] } = { a: [], b: [] };
+  const received: { a: unknown[]; b: unknown[] } = { a: [], b: [] };
+  const make = (self: 'a' | 'b', other: 'a' | 'b') =>
+    new WireLink({
+      channel: {
+        bufferedAmount: 0,
+        bufferedAmountLowThreshold: 0,
+        onbufferedamountlow: null,
+        send: (data) => queueMicrotask(() => links[other].receive(data)),
+      },
+      maxBufferedAmount: 1_000_000,
+      maxMessageSize: () => 1_000_000,
+      onMessage: (m) => received[self].push(m),
+      onPeerInfo: (info) => infos[self].push(info),
+      metadata: meta[self],
+      protocol: self === 'b' ? meta.protocolB : undefined,
+    });
+  const links: { a: WireLink; b: WireLink } = { a: make('a', 'b'), b: make('b', 'a') };
+  links.a.open();
+  links.b.open();
+  return { links, infos, received };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+describe('peer metadata', () => {
+  it('sends metadata with the hello and again when it changes', async () => {
+    const { links, infos, received } = metadataPair({ a: { buildId: 'abc', name: 'Ann' } });
+    await vi.waitFor(() => expect(infos.b).toHaveLength(1));
+    expect(infos.b[0]).toEqual({
+      protocol: PROTOCOL_VERSION,
+      metadata: { buildId: 'abc', name: 'Ann' },
+    });
+    expect(infos.a).toEqual([{ protocol: PROTOCOL_VERSION, metadata: null }]);
+
+    links.a.setMetadata({ buildId: 'def' });
+    await vi.waitFor(() => expect(infos.b).toHaveLength(2));
+    expect(infos.b[1].metadata).toEqual({ buildId: 'def' });
+    // The same metadata again is not reported, and no hello is a message.
+    links.a.setMetadata({ buildId: 'def' });
+    links.b.setMetadata(null);
+    await settle();
+    expect(infos.b).toHaveLength(2);
+    expect(infos.a).toHaveLength(1);
+    expect(received).toEqual({ a: [], b: [] });
+  });
+
+  it('reads an incompatible peer’s version and metadata', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { links, infos } = metadataPair({
+      a: { buildId: 'old' },
+      b: { buildId: 'new' },
+      protocolB: PROTOCOL_VERSION + 1,
+    });
+    await vi.waitFor(() => expect(infos.a).toHaveLength(1));
+    expect(infos.a[0]).toEqual({ protocol: PROTOCOL_VERSION + 1, metadata: { buildId: 'new' } });
+    links.b.setMetadata({ buildId: 'newer' });
+    await vi.waitFor(() => expect(infos.a).toHaveLength(2));
+    expect(infos.a[1]).toEqual({ protocol: PROTOCOL_VERSION + 1, metadata: { buildId: 'newer' } });
+    vi.restoreAllMocks();
+  });
+
+  it('sends no metadata to a phop 1.x peer', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { links, events, frames } = linkPair(
+      1_000_000,
+      '{"senderId":"x","data":1,"timestamp":0}'
+    );
+    await vi.waitFor(() => expect(events).toContain('a:incompatible:1'));
+    const sent = frames.b.length;
+    links.a.setMetadata({ x: 1 });
+    expect(frames.b).toHaveLength(sent);
+    warn.mockRestore();
+  });
+
+  it('ignores metadata that is not an object or too long, and oversized hellos', async () => {
+    const { links, infos, received } = metadataPair();
+    await vi.waitFor(() => expect(infos.a).toHaveLength(1));
+    links.a.receive(JSON.stringify({ phop: PROTOCOL_VERSION, ack: true, meta: ['x'] }));
+    links.a.receive(JSON.stringify({ phop: PROTOCOL_VERSION, ack: true, meta: { ok: 1 } }));
+    const long = 'x'.repeat(MAX_METADATA_LENGTH);
+    links.a.receive(JSON.stringify({ phop: PROTOCOL_VERSION, ack: true, meta: { long } }));
+    links.a.receive(
+      JSON.stringify({ phop: PROTOCOL_VERSION, ack: true, meta: { long: long.repeat(2) } })
+    );
+    await settle();
+    expect(infos.a.map((i) => i.metadata)).toEqual([null, { ok: 1 }, null]);
+    expect(received.a).toEqual([]);
+  });
+
+  it('normalizes our own metadata and refuses anything else', () => {
+    expect(normalizeMetadata({ a: 1, b: undefined })).toEqual({ a: 1 });
+    expect(() => normalizeMetadata(['x'])).toThrow(TypeError);
+    expect(() => normalizeMetadata('x')).toThrow(TypeError);
+    expect(() => normalizeMetadata(null)).toThrow(TypeError);
+    expect(() => normalizeMetadata({ x: 'y'.repeat(MAX_METADATA_LENGTH) })).toThrow(/limit/);
   });
 });

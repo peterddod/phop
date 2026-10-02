@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { electHost, presentCandidates } from '../core/host-election';
+import type { PeerInfo, PeerMetadata } from '../core/wire';
 import { useChannel } from './useChannel';
 import { useRoom } from './useRoom';
 
@@ -16,12 +17,14 @@ export interface Match<TConfig> {
   config: TConfig;
 }
 
-export interface UseLobbyOptions<TConfig> {
+export interface UseLobbyOptions<TConfig, TMeta extends PeerMetadata = PeerMetadata> {
   /** Guards the start config arriving from the lobby host. */
   validateConfig?: (data: unknown) => data is TConfig;
+  /** Guards each peer's metadata; metadata that fails it reads as null in `peerInfo`. */
+  validateMetadata?: (data: unknown) => data is TMeta;
 }
 
-export interface UseLobbyResult<TConfig> {
+export interface UseLobbyResult<TConfig, TMeta extends PeerMetadata = PeerMetadata> {
   phase: LobbyPhase;
   /** Everyone in the room right now, deduplicated and sorted, including self. */
   players: string[];
@@ -30,6 +33,13 @@ export interface UseLobbyResult<TConfig> {
   /** Start the match with the current roster. Lobby host only. */
   start: (...args: undefined extends TConfig ? [config?: TConfig] : [config: TConfig]) => void;
   match: Match<TConfig> | null;
+  /**
+   * Each peer's protocol version and metadata (`<Room metadata>`), by peer
+   * id: self and every remote peer whose hello has arrived, including peers
+   * on another protocol version (`useRoom().incompatiblePeers`), which are
+   * not in `players`.
+   */
+  peerInfo: Record<string, PeerInfo<TMeta>>;
 }
 
 type LobbyMessage<TConfig> =
@@ -55,11 +65,11 @@ function isRoster(value: unknown): value is string[] {
  * Lobby messages are only accepted from the peer that should be sending them:
  * the host of the roster they carry, as elected from our own view of the room.
  */
-export function useLobby<TConfig = undefined>(
+export function useLobby<TConfig = undefined, TMeta extends PeerMetadata = PeerMetadata>(
   key = 'lobby',
-  options: UseLobbyOptions<TConfig> = {}
-): UseLobbyResult<TConfig> {
-  const { peerId, peers, onPeerConnected } = useRoom();
+  options: UseLobbyOptions<TConfig, TMeta> = {}
+): UseLobbyResult<TConfig, TMeta> {
+  const { peerId, peers, onPeerConnected, peerInfo: roomPeerInfo } = useRoom();
   const [phase, setPhase] = useState<LobbyPhase>('lobby');
   const [match, setMatch] = useState<Match<TConfig> | null>(null);
 
@@ -68,6 +78,19 @@ export function useLobby<TConfig = undefined>(
     [peerId, peers]
   );
   const isLobbyHost = peerId !== '' && players[0] === peerId;
+
+  const { validateMetadata } = options;
+  const peerInfo = useMemo(() => {
+    if (!validateMetadata) return roomPeerInfo as Record<string, PeerInfo<TMeta>>;
+    const checked: Record<string, PeerInfo<TMeta>> = {};
+    for (const [id, info] of Object.entries(roomPeerInfo)) {
+      checked[id] = {
+        protocol: info.protocol,
+        metadata: info.metadata !== null && validateMetadata(info.metadata) ? info.metadata : null,
+      };
+    }
+    return checked;
+  }, [roomPeerInfo, validateMetadata]);
 
   const validateConfigRef = useRef(options.validateConfig);
   validateConfigRef.current = options.validateConfig;
@@ -100,7 +123,7 @@ export function useLobby<TConfig = undefined>(
       setPhase('playing');
     },
     [channel, isLobbyHost, players]
-  ) as UseLobbyResult<TConfig>['start'];
+  ) as UseLobbyResult<TConfig, TMeta>['start'];
 
   useEffect(
     () =>
@@ -143,5 +166,5 @@ export function useLobby<TConfig = undefined>(
     [onPeerConnected, channel]
   );
 
-  return { phase, players, isLobbyHost, start, match };
+  return { phase, players, isLobbyHost, start, match, peerInfo };
 }

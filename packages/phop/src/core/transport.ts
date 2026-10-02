@@ -1,6 +1,7 @@
 import type { SendOptions } from '../types';
 import { PeerConnection, type SignalData } from './PeerConnection';
 import { SignalingClient } from './SignalingClient';
+import type { PeerInfo, PeerMetadata } from './wire';
 
 export interface SignalingEvent {
   type: 'joined' | 'peer-list' | 'peer-joined' | 'peer-left' | 'signal' | 'disconnected';
@@ -37,6 +38,10 @@ export interface PeerLinkOptions {
   onChannelClose?: (remotePeerId: string) => void;
   /** The peer speaks another protocol version; the link ignores it from then on. */
   onIncompatible?: (remotePeerId: string, protocol: number) => void;
+  /** Our metadata, sent with the hello. */
+  metadata?: PeerMetadata | null;
+  /** The peer's hello told us its version and metadata (again when they change). */
+  onPeerInfo?: (remotePeerId: string, info: PeerInfo) => void;
 }
 
 /** A data link to one remote peer. `PeerConnection` is the WebRTC implementation. */
@@ -44,6 +49,8 @@ export interface PeerLink {
   handleSignal(data: SignalData): unknown;
   /** Send one serialised message. May throw if the link refuses it. */
   send(text: string, options?: SendOptions): void;
+  /** Publish new metadata to the peer. Optional for links without metadata. */
+  setMetadata?(metadata: PeerMetadata | null): void;
   close(): void;
 }
 
