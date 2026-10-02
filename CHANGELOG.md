@@ -1,3 +1,15 @@
+# [1.9.0](https://github.com/peterddod/phop/compare/v1.8.1...v1.9.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **phop:** stable lobby peerInfo with an inline guard; read oversized hellos' version ([3007771](https://github.com/peterddod/phop/commit/300777177d6ccd78c5321941e68248f1a3c50d30))
+
+
+### Features
+
+* **phop:** per-peer metadata and protocol version in the room ([e51b9c2](https://github.com/peterddod/phop/commit/e51b9c25cdc591b4b939dced67dda90b3265d517))
+
 ## [1.8.1](https://github.com/peterddod/phop/compare/v1.8.0...v1.8.1) (2026-10-02)
 
 
