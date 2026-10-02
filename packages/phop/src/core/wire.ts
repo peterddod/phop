@@ -573,6 +573,8 @@ export class WireLink {
     if (hello?.phop === this.protocol) {
       this.peer = 'compatible';
       this.outbox.compress = hello.deflate === true;
+      // In case the channel opened without an open event reaching us.
+      this.open();
       this.options.onReady?.();
       return;
     }

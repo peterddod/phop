@@ -141,6 +141,8 @@ class PeerConnection implements PeerLink {
     };
 
     channel.onmessage = (event) => wire.receive(event.data);
+    // A channel announced by the remote side may already be open.
+    if (channel.readyState === 'open') wire.open();
   }
 
   /** Send a serialised message, split to fit the channel's maximum message size. */
