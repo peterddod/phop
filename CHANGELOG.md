@@ -1,3 +1,16 @@
+# [1.8.0](https://github.com/peterddod/phop/compare/v1.7.0...v1.8.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **phop:** acknowledge the hello and hold messages until it arrives ([2f205a5](https://github.com/peterddod/phop/commit/2f205a574e6238a7c0c82014a660df69f177f09f))
+* **phop:** send our hello once the peer's arrives, and on an already-open channel ([881cb9b](https://github.com/peterddod/phop/commit/881cb9b56ea17783b8b89aaf0d3ea37a06d39be3))
+
+
+### Features
+
+* **phop:** compressed frames, snapshot deltas and a protocol handshake ([7a25dc0](https://github.com/peterddod/phop/commit/7a25dc097a3dce4d56dd3294fdc0874367057d5d))
+
 # [1.7.0](https://github.com/peterddod/phop/compare/v1.6.0...v1.7.0) (2026-10-02)
 
 
