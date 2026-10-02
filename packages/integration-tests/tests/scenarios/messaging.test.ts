@@ -85,4 +85,23 @@ test.describe('messaging', () => {
 
     await Promise.all([a.close(), b.close()]);
   });
+
+  test('a message larger than the SCTP maximum message size arrives intact', async ({
+    browser,
+  }) => {
+    const [a, b, c] = await createRoom(browser, 3);
+
+    // Over Chromium's 256 KiB limit, with multi-byte characters across chunk boundaries.
+    await a.page.evaluate(() => window.__phop.broadcast({ big: 'aé😀€'.repeat(100_000) }));
+    await a.broadcast('after');
+
+    for (const peer of [b, c]) {
+      const big = await peer.nextMessage();
+      expect(big.data).toEqual({ big: 'aé😀€'.repeat(100_000) });
+      const after = await peer.nextMessage();
+      expect(after.data).toBe('after');
+    }
+
+    await Promise.all([a.close(), b.close(), c.close()]);
+  });
 });

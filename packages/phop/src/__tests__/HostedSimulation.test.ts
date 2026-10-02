@@ -311,4 +311,30 @@ describe('HostedSimulation', () => {
     vi.advanceTimersByTime(500);
     expect(sims.a.getTick()).toBeGreaterThan(tick);
   });
+
+  it('sends snapshots as coalescable, so a congested peer only gets the newest', () => {
+    const { rooms } = setup(['a', 'b']);
+    const broadcast = vi.spyOn(rooms.a, 'broadcast');
+    vi.advanceTimersByTime(500);
+    expect(broadcast).toHaveBeenCalled();
+    for (const [, options] of broadcast.mock.calls) {
+      expect(options).toEqual({ coalesce: 'sim:snapshot' });
+    }
+  });
+
+  it('keeps stepping and publishing locally when broadcasting throws', () => {
+    const { rooms, sims } = setup(['a', 'b']);
+    rooms.a.broadcast = () => {
+      throw new Error('channel closed');
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const listener = vi.fn();
+    sims.a.subscribe(listener);
+    vi.advanceTimersByTime(500);
+    expect(sims.a.getTick()).toBeGreaterThan(2);
+    expect(listener).toHaveBeenCalled();
+    expect(sims.a.getVersion()).toBeGreaterThan(2);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
 });

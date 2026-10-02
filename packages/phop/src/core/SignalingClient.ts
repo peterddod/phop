@@ -1,16 +1,6 @@
-import type { SignalData } from './PeerConnection';
+import type { SignalingEvent, SignalingEventHandler, SignalingSession } from './transport';
 
-type SignalingEventHandler = (event: SignalingEvent) => void;
-
-interface SignalingEvent {
-  type: 'joined' | 'peer-list' | 'peer-joined' | 'peer-left' | 'signal' | 'disconnected';
-  peerId?: string;
-  peers?: string[];
-  from?: string;
-  data?: SignalData;
-}
-
-class SignalingClient {
+class SignalingClient implements SignalingSession {
   private ws: WebSocket | null = null;
   private eventHandlers: Map<string, SignalingEventHandler[]> = new Map();
   private peerId: string = '';

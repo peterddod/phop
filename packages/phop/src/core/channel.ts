@@ -1,12 +1,16 @@
-import type { JSONSerializable, Message, MessageHandler } from '../types';
+import type { JSONSerializable, Message, MessageHandler, SendOptions } from '../types';
 
 /** The room surface a channel needs. `RoomContextValue` satisfies it. */
 export interface ChannelRoom {
   peerId: string;
-  broadcast: <TData extends JSONSerializable = JSONSerializable>(message: Message<TData>) => void;
+  broadcast: <TData extends JSONSerializable = JSONSerializable>(
+    message: Message<TData>,
+    options?: SendOptions
+  ) => void;
   sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
     peerId: string,
-    message: Message<TData>
+    message: Message<TData>,
+    options?: SendOptions
   ) => void;
   onMessage: <TData extends JSONSerializable = JSONSerializable>(
     handler: MessageHandler<TData>
@@ -29,6 +33,15 @@ interface ChannelEnvelope {
   d: JSONSerializable;
 }
 
+export interface ChannelOptions {
+  /**
+   * Each message supersedes the previous one (e.g. state snapshots): while a
+   * peer's channel is congested only the newest is kept and sent once it
+   * drains. See `SendOptions.coalesce`.
+   */
+  latestOnly?: boolean;
+}
+
 function isEnvelope(value: unknown): value is ChannelEnvelope {
   return (
     typeof value === 'object' &&
@@ -48,8 +61,10 @@ function isEnvelope(value: unknown): value is ChannelEnvelope {
 export function createChannel<T>(
   room: ChannelRoom,
   name: string,
-  validate: (data: unknown) => data is T
+  validate: (data: unknown) => data is T,
+  options: ChannelOptions = {}
 ): Channel<T> {
+  const sendOptions: SendOptions | undefined = options.latestOnly ? { coalesce: name } : undefined;
   const wrap = (data: T): Message<JSONSerializable> => ({
     senderId: room.peerId,
     data: { ch: name, d: data as JSONSerializable },
@@ -58,10 +73,10 @@ export function createChannel<T>(
 
   return {
     send: (peerId, data) => {
-      room.sendToPeer(peerId, wrap(data));
+      room.sendToPeer(peerId, wrap(data), sendOptions);
     },
     broadcast: (data) => {
-      room.broadcast(wrap(data));
+      room.broadcast(wrap(data), sendOptions);
     },
     subscribe: (handler) =>
       room.onMessage(({ senderId, data }) => {

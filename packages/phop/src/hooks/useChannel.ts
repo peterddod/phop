@@ -25,8 +25,9 @@ export function useChannel<T>(name: string, validate: (data: unknown) => data is
       get peerId() {
         return roomRef.current.peerId;
       },
-      broadcast: (message) => roomRef.current.broadcast(message),
-      sendToPeer: (peerId, message) => roomRef.current.sendToPeer(peerId, message),
+      broadcast: (message, options) => roomRef.current.broadcast(message, options),
+      sendToPeer: (peerId, message, options) =>
+        roomRef.current.sendToPeer(peerId, message, options),
       onMessage: (handler) => roomRef.current.onMessage(handler),
     };
     return createChannel(liveRoom, name, (data: unknown): data is T => validateRef.current(data));

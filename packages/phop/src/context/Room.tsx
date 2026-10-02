@@ -1,7 +1,11 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PeerConnection } from '../core/PeerConnection';
-import { SignalingClient } from '../core/SignalingClient';
-import type { JSONSerializable, Message, MessageHandler } from '../types';
+import {
+  type PeerLink,
+  type RoomTransport,
+  type SignalingSession,
+  webRtcTransport,
+} from '../core/transport';
+import type { JSONSerializable, Message, MessageHandler, SendOptions } from '../types';
 
 export interface RoomContextValue {
   roomId: string;
@@ -21,10 +25,18 @@ export interface RoomContextValue {
    * Remount `<Room>` (e.g. change its React `key`) to join again.
    */
   isConnected: boolean;
-  broadcast: <TData extends JSONSerializable = JSONSerializable>(message: Message<TData>) => void;
+  /**
+   * Send to every connected peer. The message is serialised once; a peer
+   * whose send fails is skipped without affecting the others.
+   */
+  broadcast: <TData extends JSONSerializable = JSONSerializable>(
+    message: Message<TData>,
+    options?: SendOptions
+  ) => void;
   sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
     peerId: string,
-    message: Message<TData>
+    message: Message<TData>,
+    options?: SendOptions
   ) => void;
   onMessage: <TData extends JSONSerializable = JSONSerializable>(
     handler: MessageHandler<TData>
@@ -46,26 +58,53 @@ interface RoomProps extends React.PropsWithChildren {
   roomId: string;
   /** WebRTC configuration, e.g. to add TURN servers. Defaults to Google STUN. */
   rtcConfig?: RTCConfiguration;
+  /**
+   * Bytes queued on a peer's data channel above which coalescable messages
+   * (see `SendOptions.coalesce`, e.g. hosted-simulation snapshots) are held
+   * back, keeping only the newest. Default 256 KiB.
+   */
+  maxBufferedAmount?: number;
+  /**
+   * How peers connect. Defaults to WebRTC with a WebSocket signalling server;
+   * pass `createMemoryNetwork().transport` to run peers in one process.
+   * Read once per `signallingServerUrl`/`roomId`.
+   */
+  transport?: RoomTransport;
 }
 
 function dedupe(ids: string[]): string[] {
   return Array.from(new Set(ids));
 }
 
-export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomProps) {
+function logSendFailure(peerId: string, error: unknown) {
+  console.error(`phop: send to ${peerId} failed:`, error);
+}
+
+export function Room({
+  children,
+  signallingServerUrl,
+  roomId,
+  rtcConfig,
+  maxBufferedAmount,
+  transport = webRtcTransport,
+}: RoomProps) {
   const [peerId, setPeerId] = useState<string>('');
   const [peers, setPeers] = useState<string[]>([]);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
 
-  const signalingClientRef = useRef<SignalingClient | null>(null);
-  const connectionsRef = useRef<Map<string, PeerConnection>>(new Map());
+  const signalingClientRef = useRef<SignalingSession | null>(null);
+  const connectionsRef = useRef<Map<string, PeerLink>>(new Map());
   const handlersRef = useRef<Set<MessageHandler>>(new Set());
   const peerConnectedHandlersRef = useRef<Set<(remotePeerId: string) => void>>(new Set());
   const peerDisconnectedHandlersRef = useRef<Set<(remotePeerId: string) => void>>(new Set());
   const connectedRef = useRef<Set<string>>(new Set());
   const rtcConfigRef = useRef(rtcConfig);
   rtcConfigRef.current = rtcConfig;
+  const maxBufferedAmountRef = useRef(maxBufferedAmount);
+  maxBufferedAmountRef.current = maxBufferedAmount;
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
   const internalStoreRegistriesRef = useRef<Map<string, Map<string, unknown>>>(new Map());
   let internalStoreRegistry = internalStoreRegistriesRef.current.get(roomId);
   if (!internalStoreRegistry) {
@@ -88,7 +127,7 @@ export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomP
 
   useEffect(
     function initializeSignalingClient() {
-      const client = new SignalingClient(signallingServerUrl, roomId);
+      const client = transportRef.current.createSignaling(signallingServerUrl, roomId);
       signalingClientRef.current = client;
 
       client.on('joined', (event) => {
@@ -177,11 +216,12 @@ export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomP
 
         if (connectionsRef.current.has(remotePeerId)) return;
 
-        const connection = new PeerConnection({
+        const connection = transportRef.current.createPeer({
           localPeerId: peerId,
           remotePeerId,
           signalingClient,
           rtcConfig: rtcConfigRef.current,
+          maxBufferedAmount: maxBufferedAmountRef.current,
           onChannelMessage: (fromPeerId, raw) => {
             const message: Message<JSONSerializable> = {
               senderId: fromPeerId,
@@ -223,16 +263,35 @@ export function Room({ children, signallingServerUrl, roomId, rtcConfig }: RoomP
     [peers, peerId, markConnected, markDisconnected]
   );
 
-  const broadcast = useCallback(<TData extends JSONSerializable>(message: Message<TData>): void => {
-    connectionsRef.current.forEach((connection) => {
-      connection.send(message);
-    });
-  }, []);
+  const broadcast = useCallback(
+    <TData extends JSONSerializable>(message: Message<TData>, options?: SendOptions): void => {
+      if (connectionsRef.current.size === 0) return;
+      const text = JSON.stringify(message);
+      connectionsRef.current.forEach((connection, remotePeerId) => {
+        try {
+          connection.send(text, options);
+        } catch (error) {
+          logSendFailure(remotePeerId, error);
+        }
+      });
+    },
+    []
+  );
 
   const sendToPeer = useCallback(
-    <TData extends JSONSerializable>(targetPeerId: string, message: Message<TData>): void => {
+    <TData extends JSONSerializable>(
+      targetPeerId: string,
+      message: Message<TData>,
+      options?: SendOptions
+    ): void => {
       const connection = connectionsRef.current.get(targetPeerId);
-      connection?.send(message);
+      if (!connection) return;
+      const text = JSON.stringify(message);
+      try {
+        connection.send(text, options);
+      } catch (error) {
+        logSendFailure(targetPeerId, error);
+      }
     },
     []
   );

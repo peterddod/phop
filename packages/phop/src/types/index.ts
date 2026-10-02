@@ -1,1 +1,1 @@
-export type { JSONSerializable, Message, MessageHandler } from './core';
+export type { JSONSerializable, Message, MessageHandler, SendOptions } from './core';

@@ -50,6 +50,10 @@ Establishes a WebRTC mesh with all peers in the given room.
 | `signallingServerUrl` | `string` | WebSocket URL of the signaling server |
 | `roomId` | `string` | Room identifier — peers sharing a room ID connect to each other |
 | `rtcConfig` | `RTCConfiguration?` | WebRTC config, e.g. TURN servers. Defaults to Google STUN |
+| `maxBufferedAmount` | `number?` | Bytes queued on a peer's data channel above which coalescable messages (such as `useHostedSimulation` snapshots) are held back, keeping only the newest. Default 256 KiB |
+| `transport` | `RoomTransport?` | How peers connect. Defaults to WebRTC with the signalling server; see [Testing without a network](#testing-without-a-network) |
+
+**Sending.** A broadcast is serialised once for all peers, and a peer whose send fails is logged and skipped without affecting the rest. Messages larger than the data channel's maximum message size (`RTCSctpTransport.maxMessageSize`, 256 KiB if unknown) are split into chunks and reassembled in order on arrival, so a large state never fails to send. A message sent with `{ coalesce: key }` (the optional last argument of `broadcast` and `sendToPeer`) is held while that peer's channel has more than `maxBufferedAmount` bytes queued; a newer message with the same key replaces it, and the newest is sent once the channel drains. Every peer in a room must run the same phop version.
 
 ### `useSharedState(key, initialValue, strategy?)`
 
@@ -146,7 +150,7 @@ chat.broadcast({ text: 'hi' });
 chat.send(peerId, { text: 'just you' });
 ```
 
-`createChannel(room, name, validate)` does the same outside React.
+`createChannel(room, name, validate, options?)` does the same outside React. With `{ latestOnly: true }` each message supersedes the previous one, so a congested peer is sent only the newest (see **Sending** under `<Room>`).
 
 ### `useHost(options?)`
 
@@ -192,10 +196,26 @@ const { getState, dispatch, tick, version, isHost, hostId } = useHostedSimulatio
 
 - **Host migration.** When the host leaves, the next player takes over after a short grace period (`migrationGraceMs`, default 1000). A demoted host hands its state to the new host, resending until the data channel is open, so a returning host never rolls the match back. The new host accepts that handover only from the peer that held authority in between, and only if its tick is plausible.
 - **Cut-off guard.** A host that sees every remaining rival vanish at once pauses instead of simulating alone, and resumes if they reappear. A host that loses the signalling server stops for good (see `useRoom`).
+- **Slow peers.** Snapshots are coalescable: a peer whose data channel is backed up skips stale snapshots and gets the newest once it drains, rather than falling further behind. A failing send never stops the host's own loop.
 - **Hidden tabs.** The loop runs on a worker timer, so it keeps going when the host's tab is hidden.
 - **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta` and `maxCatchUp`.
 
 `key`, `players` and `init` are read once per mount. Remount to start a new simulation. `HostedSimulation` is the same thing without React.
+
+## Testing without a network
+
+`createMemoryNetwork()` runs rooms in one process, with no signalling server or WebRTC. Pass its transport to every `<Room>`; peers get ids `peer-0001`, `peer-0002`, … in join order, and messages go through the same framing as real data channels.
+
+```tsx
+const net = createMemoryNetwork({ maxMessageSize: 16 * 1024 }); // optional: exercise chunking
+
+render(<Room signallingServerUrl="memory" roomId="test" transport={net.transport}><Game /></Room>);
+render(<Room signallingServerUrl="memory" roomId="test" transport={net.transport}><Game /></Room>);
+
+net.dropSignaling('peer-0001'); // the first peer loses its connection; the others see it leave
+```
+
+Events are delivered as microtasks, so wait for them (e.g. with Testing Library's `waitFor`). `RoomTransport` is the interface to implement for other transports.
 
 ## Signaling Server
 
