@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/peterddod/phop/compare/v1.6.0...v1.7.0) (2026-10-02)
+
+
+### Features
+
+* **phop:** safer sends, chunking, backpressure and an in-memory transport ([d8b7418](https://github.com/peterddod/phop/commit/d8b741808495e2f359ebe1f9b6ef083676f53fef))
+
 # [1.6.0](https://github.com/peterddod/phop/compare/v1.5.0...v1.6.0) (2026-09-27)
 
 
