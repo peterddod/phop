@@ -140,14 +140,18 @@ export class HostedSimulation<TState, TInput> {
       get peerId() {
         return self.room.peerId;
       },
-      broadcast: (message) => this.room.broadcast(message),
-      sendToPeer: (peerId, message) => this.room.sendToPeer(peerId, message),
+      broadcast: (message, sendOptions) => this.room.broadcast(message, sendOptions),
+      sendToPeer: (peerId, message, sendOptions) =>
+        this.room.sendToPeer(peerId, message, sendOptions),
       onMessage: (handler) => this.room.onMessage(handler),
     };
     this.inputChannel = createChannel(liveRoom, `${key}:input`, (data): data is TInput =>
       this.options.validateInput(data)
     );
-    this.snapshotChannel = createChannel(liveRoom, `${key}:snapshot`, this.isSnapshot);
+    // Only the newest snapshot matters, so a congested peer skips stale ones.
+    this.snapshotChannel = createChannel(liveRoom, `${key}:snapshot`, this.isSnapshot, {
+      latestOnly: true,
+    });
     this.hostId = this.electHost();
   }
 
@@ -330,11 +334,15 @@ export class HostedSimulation<TState, TInput> {
     }
     if (t - pending.lastSent < HANDOVER_RESEND_MS) return;
     pending.lastSent = t;
-    this.snapshotChannel.send(pending.to, {
-      hostId: this.room.peerId,
-      tick: this.tick,
-      state: this.state,
-    });
+    try {
+      this.snapshotChannel.send(pending.to, {
+        hostId: this.room.peerId,
+        tick: this.tick,
+        state: this.state,
+      });
+    } catch (error) {
+      console.error('phop: sending the handover failed:', error);
+    }
   }
 
   private handlePeerConnected = (remotePeerId: string): void => {
@@ -463,8 +471,13 @@ export class HostedSimulation<TState, TInput> {
     if (stepped) {
       // Once per frame: receivers only keep the newest tick, so a catch-up
       // frame with several sub-steps shouldn't send several snapshots.
+      // A failed send must not stop the local state from being published.
       if (this.isMultiplayer) {
-        this.snapshotChannel.broadcast({ hostId: self, tick: this.tick, state: this.state });
+        try {
+          this.snapshotChannel.broadcast({ hostId: self, tick: this.tick, state: this.state });
+        } catch (error) {
+          console.error('phop: broadcasting the snapshot failed:', error);
+        }
       }
       this.bump();
     }

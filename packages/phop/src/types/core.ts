@@ -19,3 +19,13 @@ export type Message<TData extends JSONSerializable = JSONSerializable> = {
 export type MessageHandler<TData extends JSONSerializable = JSONSerializable> = (
   message: Message<TData>
 ) => void;
+
+export interface SendOptions {
+  /**
+   * Coalescing key. While a peer's channel is congested, a message with a key
+   * is held back and replaced by any newer message with the same key, so only
+   * the latest one is sent once the channel drains. Use it for messages that
+   * supersede each other, like state snapshots.
+   */
+  coalesce?: string;
+}

@@ -1,28 +1,24 @@
-import type { SignalingClient } from './SignalingClient';
+import type { SendOptions } from '../types';
+import type { PeerLink, PeerLinkOptions, SignalingSession } from './transport';
+import { createInbox, DEFAULT_MAX_BUFFERED_AMOUNT, maxMessageSizeOf, Outbox } from './wire';
 
 export type SignalData =
   | { type: 'offer'; sdp: RTCSessionDescriptionInit }
   | { type: 'answer'; sdp: RTCSessionDescriptionInit }
   | { type: 'ice-candidate'; candidate: RTCIceCandidateInit };
 
-export interface PeerConnectionOptions {
-  localPeerId: string;
-  remotePeerId: string;
-  signalingClient: SignalingClient;
-  rtcConfig?: RTCConfiguration;
-  onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
-  onChannelOpen?: (remotePeerId: string) => void;
-  onChannelClose?: (remotePeerId: string) => void;
-}
+export type PeerConnectionOptions = PeerLinkOptions;
 
-class PeerConnection {
+class PeerConnection implements PeerLink {
   private static readonly DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
   private pc: RTCPeerConnection;
   private dataChannel: RTCDataChannel | null = null;
+  private outbox: Outbox | null = null;
   private selfPeerId: string;
   private remotePeerId: string;
-  private signalingClient: SignalingClient;
+  private signalingClient: SignalingSession;
+  private maxBufferedAmount: number;
   private onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
   private onChannelOpen?: (remotePeerId: string) => void;
   private onChannelClose?: (remotePeerId: string) => void;
@@ -34,6 +30,7 @@ class PeerConnection {
     this.onChannelMessage = opts.onChannelMessage;
     this.onChannelOpen = opts.onChannelOpen;
     this.onChannelClose = opts.onChannelClose;
+    this.maxBufferedAmount = opts.maxBufferedAmount ?? DEFAULT_MAX_BUFFERED_AMOUNT;
 
     this.pc = new RTCPeerConnection(
       opts.rtcConfig ?? { iceServers: PeerConnection.DEFAULT_ICE_SERVERS }
@@ -116,6 +113,11 @@ class PeerConnection {
   }
 
   private setupDataChannel(channel: RTCDataChannel) {
+    this.outbox = new Outbox(channel, this.maxBufferedAmount, () =>
+      maxMessageSizeOf(this.pc.sctp?.maxMessageSize)
+    );
+    const receive = createInbox((message) => this.onChannelMessage?.(this.remotePeerId, message));
+
     channel.onopen = () => {
       console.log(`Data channel open to ${this.remotePeerId}`);
       this.onChannelOpen?.(this.remotePeerId);
@@ -130,15 +132,13 @@ class PeerConnection {
       console.error(`Data channel error with ${this.remotePeerId}:`, error);
     };
 
-    channel.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      this.onChannelMessage?.(this.remotePeerId, message);
-    };
+    channel.onmessage = (event) => receive(event.data);
   }
 
-  send(message: Record<string, unknown>) {
+  /** Send a serialised message, split to fit the channel's maximum message size. */
+  send(text: string, options?: SendOptions) {
     if (this.dataChannel?.readyState === 'open') {
-      this.dataChannel.send(JSON.stringify(message));
+      this.outbox?.send(text, options);
     }
   }
 
