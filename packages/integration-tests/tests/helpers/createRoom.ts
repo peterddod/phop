@@ -18,6 +18,8 @@ interface CreateRoomOptions {
   expectedTotalPeers?: number;
   /** Mount the lobby/simulation probe (`window.__game`). */
   game?: boolean;
+  /** With `game`: the host steps the simulation in a Web Worker. */
+  worker?: boolean;
   /** `<Room metadata>` for each spawned peer, by spawn index. */
   metadata?: (index: number) => Record<string, unknown>;
 }
@@ -44,7 +46,7 @@ export async function createRoom(
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL;
   const totalPeers = options.expectedTotalPeers ?? peerCount;
 
-  const baseUrl = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}${options.game ? '&game=1' : ''}`;
+  const baseUrl = `${HARNESS_URL}/?roomId=${encodeURIComponent(roomId)}&serverUrl=${encodeURIComponent(serverUrl)}${options.game ? '&game=1' : ''}${options.worker ? '&worker=1' : ''}`;
 
   const handles: PeerHandle[] = [];
 

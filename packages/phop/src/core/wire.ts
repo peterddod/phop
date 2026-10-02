@@ -275,6 +275,14 @@ export function deflateText(text: string): Promise<Uint8Array<ArrayBuffer>> {
   return bytes;
 }
 
+/**
+ * Record `bytes` as `deflateText(text)`, e.g. compressed in a Web Worker, so
+ * sending `text` doesn't compress it again.
+ */
+export function primeDeflate(text: string, bytes: Uint8Array<ArrayBuffer>): void {
+  lastDeflated = { text, bytes: Promise.resolve(bytes) };
+}
+
 /** The text in deflate-raw `bytes`. Rejects on corrupt or oversized data. */
 export async function inflateText(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const out = await pipeBytes(
