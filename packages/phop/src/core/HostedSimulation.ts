@@ -83,7 +83,7 @@ export interface HostedSimulationOptions<TState, TInput> {
    * of entities matches elements by it instead of by position. Return
    * undefined for elements to match by position (an array is matched by
    * identity only if every element has one). `path` is the array's path
-   * from the root. Default: an object element's `id`, if it is a string or
+   * from the root, reused between calls (copy it to keep it). Default: an object element's `id`, if it is a string or
    * a number.
    */
   getId?: (item: unknown, path: (string | number)[]) => string | number | undefined;
@@ -178,7 +178,7 @@ export class HostedSimulation<TState, TInput> {
   private readonly listeners = new Set<() => void>();
   private readonly inputChannel: Channel<TInput>;
   private readonly snapshotChannel: Channel<Snapshot<TState>>;
-  // Keyframes for one peer (joins, resyncs), never superseded by later snapshots.
+  // Join and resync keyframes from phop 1.8.0 hosts; ours go on the snapshot channel.
   private readonly keyframeChannel: Channel<Snapshot<TState>>;
   private readonly resyncChannel: Channel<true>;
 
@@ -213,7 +213,8 @@ export class HostedSimulation<TState, TInput> {
     this.inputChannel = createChannel(liveRoom, `${key}:input`, (data): data is TInput =>
       this.options.validateInput(data)
     );
-    // Only the newest snapshot matters, so a congested peer skips stale ones.
+    // Only the newest snapshot matters, so a congested peer skips stale ones
+    // (a delta replacing a held snapshot goes as a keyframe, see broadcastSnapshot).
     this.snapshotChannel = createChannel(liveRoom, `${key}:snapshot`, this.isSnapshot, {
       latestOnly: true,
     });
@@ -535,8 +536,10 @@ export class HostedSimulation<TState, TInput> {
     const t = now();
     if (t - (this.keyframeSentAt.get(peerId) ?? -Infinity) < RESYNC_ANSWER_MS) return;
     this.keyframeSentAt.set(peerId, t);
+    // On the snapshot channel, so on a congested link it is held and replaced
+    // like any snapshot rather than queued behind them.
     try {
-      this.keyframeChannel.send(peerId, {
+      this.snapshotChannel.send(peerId, {
         hostId: this.room.peerId,
         tick: sent.tick,
         seq: sent.seq,
@@ -574,7 +577,12 @@ export class HostedSimulation<TState, TInput> {
     } else {
       const getId = this.options.getId ?? defaultGetId;
       const patch = diffJson(prev.state, state, getId);
-      this.snapshotChannel.broadcast({ hostId, tick, seq, base: prev.seq, patch });
+      // A peer whose held snapshot (maybe this delta's base) this replaces gets
+      // the same snapshot in full, so it never holds a delta it can't apply.
+      this.snapshotChannel.broadcast(
+        { hostId, tick, seq, base: prev.seq, patch },
+        { hostId, tick, seq, state: state as TState }
+      );
     }
   }
 

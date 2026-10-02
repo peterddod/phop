@@ -145,6 +145,32 @@ describe('Outbox', () => {
     expect(channel.sent.slice(2)).toEqual(['{"tick":3}', '{"other":1}']);
   });
 
+  it('sends the supersede message in place of one that replaced a held message', () => {
+    const channel = new FakeChannel();
+    const outbox = new Outbox(channel, 100, () => 1_000_000);
+    const supersede = (seq: number) => vi.fn(() => `{"key":${seq}}`);
+
+    outbox.send(JSON.stringify({ key: 1, pad: 'p'.repeat(200) }), { coalesce: 'snap' });
+    // Congested: delta 2 is held as itself (its base, 1, went out).
+    const s2 = supersede(2);
+    outbox.send('{"delta":2,"base":1}', { coalesce: 'snap', supersede: s2 });
+    expect(s2).not.toHaveBeenCalled();
+    // Delta 3 replaces delta 2, its base: held as a keyframe instead.
+    outbox.send('{"delta":3,"base":2}', { coalesce: 'snap', supersede: supersede(3) });
+    channel.drain();
+    expect(channel.sent.slice(1)).toEqual(['{"key":3}']);
+
+    // Replaced while held, then sent once the channel has drained: still a keyframe.
+    channel.bufferedAmount = 1000;
+    outbox.send('{"delta":4,"base":3}', { coalesce: 'snap' });
+    channel.bufferedAmount = 0;
+    outbox.send('{"delta":5,"base":4}', { coalesce: 'snap', supersede: supersede(5) });
+    expect(channel.sent.slice(2)).toEqual(['{"key":5}']);
+    // Nothing replaced: the delta itself.
+    outbox.send('{"delta":6,"base":5}', { coalesce: 'snap', supersede: supersede(6) });
+    expect(channel.sent.slice(3)).toEqual(['{"delta":6,"base":5}']);
+  });
+
   it('sends held messages on the next send if the drain event was missed', () => {
     const channel = new FakeChannel();
     const outbox = new Outbox(channel, 10, () => 1_000_000);
@@ -247,6 +273,15 @@ describe('wire link', () => {
     expect(received.b).toEqual([{ early: 1 }, { late: 2 }]);
     // The acknowledgements are not delivered as messages.
     expect(received.a).toEqual([]);
+  });
+
+  it('sends the supersede message for one replacing a message held before the handshake', async () => {
+    const { links, received, events } = linkPair(1_000_000, undefined, true);
+    links.a.send('{"key":1}', { coalesce: 'snap' });
+    links.a.send('{"delta":2,"base":1}', { coalesce: 'snap', supersede: () => '{"key":2}' });
+    await vi.waitFor(() => expect(events).toHaveLength(2));
+    await vi.waitFor(() => expect(received.b).toHaveLength(1));
+    expect(received.b).toEqual([{ key: 2 }]);
   });
 
   it('chunks compressed messages larger than the maximum message size', async () => {

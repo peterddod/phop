@@ -343,8 +343,9 @@ export class BinaryReassembler {
  * One peer's outgoing side: compresses large messages (once `compress` is
  * set), frames each message for the channel's maximum message size and,
  * while more than `maxBufferedAmount` bytes are queued, holds coalescable
- * messages back, keeping only the newest per key. Held messages go out once
- * the channel drains below the threshold.
+ * messages back, keeping only the newest per key (or its `supersede`
+ * message, when it replaced one). Held messages go out once the channel
+ * drains below the threshold.
  */
 export class Outbox {
   private readonly held = new Map<string, string>();
@@ -376,13 +377,16 @@ export class Outbox {
    */
   send(text: string, options?: SendOptions): void {
     const key = options?.coalesce;
-    if (key !== undefined) this.held.delete(key);
+    const replaced = key !== undefined && this.held.delete(key);
     if (this.held.size > 0) this.flush();
+    // The peer never gets the replaced message, even if the channel has
+    // drained since: send what stands in for both.
+    const out = replaced && options?.supersede ? options.supersede() : text;
     if (key !== undefined && this.congested()) {
-      this.held.set(key, text);
+      this.held.set(key, out);
       return;
     }
-    this.enqueue(text);
+    this.enqueue(out);
   }
 
   private congested(): boolean {
@@ -586,9 +590,15 @@ export class WireLink {
       return;
     }
     const key = options?.coalesce;
-    if (key !== undefined) this.pending = this.pending.filter((m) => m.options?.coalesce !== key);
+    let replaced = false;
+    if (key !== undefined) {
+      const kept = this.pending.filter((m) => m.options?.coalesce !== key);
+      replaced = kept.length < this.pending.length;
+      this.pending = kept;
+    }
     if (this.pending.length >= MAX_PENDING) this.pending.shift();
-    this.pending.push({ text, options });
+    const out = replaced && options?.supersede ? options.supersede() : text;
+    this.pending.push({ text: out, options });
   }
 
   receive = (frame: unknown): void => {

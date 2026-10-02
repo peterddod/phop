@@ -21,6 +21,7 @@ export function createMockRoomContext(
     onMessage: vi.fn(() => () => {}),
     onPeerConnected: vi.fn(() => () => {}),
     onPeerDisconnected: vi.fn(() => () => {}),
+    incompatiblePeers: [],
     __internalStoreRegistry: new Map(),
   };
 

@@ -19,7 +19,8 @@ export interface RoomContextValue {
    * Peers in the room that speak another wire protocol version
    * (`PROTOCOL_VERSION`), e.g. a different phop release. They are left out
    * of `peers` and nothing is exchanged with them; show them to the user
-   * (e.g. "update to play with X"). Optional for custom providers.
+   * (e.g. "update to play with X"). Always set by `<Room>`; optional for
+   * custom providers (`useRoom` fills it in).
    */
   incompatiblePeers?: string[];
   /**

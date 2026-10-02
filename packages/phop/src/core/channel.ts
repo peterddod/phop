@@ -23,8 +23,12 @@ export interface ChannelRoom {
  * fails. The sender id comes from the transport, never from the payload.
  */
 export interface Channel<T> {
-  send(peerId: string, data: T): void;
-  broadcast(data: T): void;
+  /**
+   * On a `latestOnly` channel, `supersede` is sent in place of `data` to a
+   * peer for whom `data` replaces a held message (see `SendOptions.supersede`).
+   */
+  send(peerId: string, data: T, supersede?: T): void;
+  broadcast(data: T, supersede?: T): void;
   subscribe(handler: (data: T, senderId: string) => void): () => void;
 }
 
@@ -64,19 +68,31 @@ export function createChannel<T>(
   validate: (data: unknown) => data is T,
   options: ChannelOptions = {}
 ): Channel<T> {
-  const sendOptions: SendOptions | undefined = options.latestOnly ? { coalesce: name } : undefined;
   const wrap = (data: T): Message<JSONSerializable> => ({
     senderId: room.peerId,
     data: { ch: name, d: data as JSONSerializable },
     timestamp: Date.now(),
   });
+  const sendOptions = (supersede?: T): SendOptions | undefined => {
+    if (!options.latestOnly) return undefined;
+    if (supersede === undefined) return { coalesce: name };
+    // Serialised once, and only if some peer needs it.
+    let text: string | undefined;
+    return {
+      coalesce: name,
+      supersede: () => {
+        if (text === undefined) text = JSON.stringify(wrap(supersede));
+        return text;
+      },
+    };
+  };
 
   return {
-    send: (peerId, data) => {
-      room.sendToPeer(peerId, wrap(data), sendOptions);
+    send: (peerId, data, supersede) => {
+      room.sendToPeer(peerId, wrap(data), sendOptions(supersede));
     },
-    broadcast: (data) => {
-      room.broadcast(wrap(data), sendOptions);
+    broadcast: (data, supersede) => {
+      room.broadcast(wrap(data), sendOptions(supersede));
     },
     subscribe: (handler) =>
       room.onMessage(({ senderId, data }) => {
