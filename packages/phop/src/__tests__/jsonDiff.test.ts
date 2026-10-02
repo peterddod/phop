@@ -132,6 +132,43 @@ describe('json diff', () => {
     expect(applyJsonPatch(c, patch)).toEqual(d);
   });
 
+  it('gives every operation its own path, deep in nested keyed splices', () => {
+    const a: JsonValue = {
+      w: {
+        units: [
+          { id: 1, pos: [0, 0] },
+          { id: 2, pos: [1, 1] },
+          { id: 3, pos: [2, 2] },
+        ],
+      },
+      t: 1,
+    };
+    const b: JsonValue = {
+      w: {
+        units: [
+          { id: 1, pos: [0, 5] },
+          { id: 3, pos: [2, 2], hp: 4 },
+        ],
+      },
+      t: 2,
+    };
+    const paths: JsonValue[] = [];
+    const patch = diffJson(a, b, (item, path) => {
+      paths.push(path.slice());
+      return (item as { id: number }).id;
+    });
+    expect(patch).toEqual([
+      [2, ['w', 'units'], 1, 1, []],
+      [0, ['w', 'units', 0, 'pos', 1], 5],
+      [0, ['w', 'units', 1, 'hp'], 4],
+      [0, ['t'], 2],
+    ]);
+    expect(new Set(paths.map((p) => JSON.stringify(p)))).toEqual(
+      new Set(['["w","units"]', '["w","units",0,"pos"]', '["w","units",1,"pos"]'])
+    );
+    expect(applyJsonPatch(a, patch)).toEqual(b);
+  });
+
   it('trims the front of a shrinking array with one splice', () => {
     const path = [
       { q: 1, r: 1 },

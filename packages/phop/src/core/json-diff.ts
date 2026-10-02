@@ -36,7 +36,8 @@ export type JsonPatch = JsonPatchOp[];
 /**
  * An array element's identity, or undefined if it has none. Arrays whose
  * elements (before and after) all have one are diffed by identity, so an
- * insertion or removal doesn't rewrite every element after it.
+ * insertion or removal doesn't rewrite every element after it. `path` is
+ * reused between calls; copy it to keep it.
  */
 export type GetJsonId = (item: JsonValue, path: JsonPath) => string | number | undefined;
 
@@ -105,6 +106,8 @@ export function diffJson(a: JsonValue, b: JsonValue, getId: GetJsonId = defaultG
   return ops;
 }
 
+// `path` is one stack shared by the whole walk (pushed before recursing,
+// popped after), so it is copied only into the operations that keep it.
 function diffValue(a: JsonValue, b: JsonValue, path: JsonPath, ops: JsonPatch, getId: GetJsonId) {
   if (a === b) return;
   if (Array.isArray(a) && Array.isArray(b)) {
@@ -112,7 +115,7 @@ function diffValue(a: JsonValue, b: JsonValue, path: JsonPath, ops: JsonPatch, g
   } else if (isObject(a) && isObject(b)) {
     diffObject(a, b, path, ops, getId);
   } else {
-    ops.push([0, path, b]);
+    ops.push([0, path.slice(), b]);
   }
 }
 
@@ -126,13 +129,18 @@ function diffObject(
   const keysA = Object.keys(a);
   const keysB = Object.keys(b);
   if (!keepsKeyOrder(a, b, keysA, keysB)) {
-    ops.push([0, path, b]);
+    ops.push([0, path.slice(), b]);
     return;
   }
   for (const key of keysA) if (!hasOwn(b, key)) ops.push([1, [...path, key]]);
   for (const key of keysB) {
-    if (hasOwn(a, key)) diffValue(a[key], b[key], [...path, key], ops, getId);
-    else ops.push([0, [...path, key], b[key]]);
+    if (!hasOwn(a, key)) {
+      ops.push([0, [...path, key], b[key]]);
+      continue;
+    }
+    path.push(key);
+    diffValue(a[key], b[key], path, ops, getId);
+    path.pop();
   }
 }
 
@@ -167,7 +175,7 @@ function diffArray(
     : (i: number, j: number) => equal(a[i], b[j]);
 
   if (a.length === b.length && (!keyed || idsA.every((id, i) => id === idsB[i]))) {
-    for (let i = 0; i < a.length; i++) diffValue(a[i], b[i], [...path, i], ops, getId);
+    for (let i = 0; i < a.length; i++) diffAt(a[i], b[i], i, path, ops, getId);
     return;
   }
   const shortest = Math.min(a.length, b.length);
@@ -178,15 +186,34 @@ function diffArray(
     suffix++;
   }
   if (prefix + suffix === 0) {
-    ops.push([0, path, b]);
+    ops.push([0, path.slice(), b]);
     return;
   }
-  ops.push([2, path, prefix, a.length - prefix - suffix, b.slice(prefix, b.length - suffix)]);
+  ops.push([
+    2,
+    path.slice(),
+    prefix,
+    a.length - prefix - suffix,
+    b.slice(prefix, b.length - suffix),
+  ]);
   if (!keyed) return;
-  for (let i = 0; i < prefix; i++) diffValue(a[i], b[i], [...path, i], ops, getId);
+  for (let i = 0; i < prefix; i++) diffAt(a[i], b[i], i, path, ops, getId);
   for (let k = 1; k <= suffix; k++) {
-    diffValue(a[a.length - k], b[b.length - k], [...path, b.length - k], ops, getId);
+    diffAt(a[a.length - k], b[b.length - k], b.length - k, path, ops, getId);
   }
+}
+
+function diffAt(
+  a: JsonValue,
+  b: JsonValue,
+  index: number,
+  path: JsonPath,
+  ops: JsonPatch,
+  getId: GetJsonId
+) {
+  path.push(index);
+  diffValue(a, b, path, ops, getId);
+  path.pop();
 }
 
 // ---------------------------------------------------------------------

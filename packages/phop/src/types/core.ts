@@ -28,4 +28,11 @@ export interface SendOptions {
    * supersede each other, like state snapshots.
    */
   coalesce?: string;
+  /**
+   * With `coalesce`: the serialised message (a JSON `Message`) to send in
+   * its place when it replaces a held message, which the peer then never
+   * gets. For messages that build on the one before (e.g. a delta), so the
+   * peer gets a self-contained one instead. Called at most once per peer.
+   */
+  supersede?: () => string;
 }

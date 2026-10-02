@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HostedSimulation, type HostedSimulationOptions } from '../core/HostedSimulation';
+import { type DataChannelLike, Outbox } from '../core/wire';
 import { createMockNetwork, type MockRoom } from './helpers/mockNetwork';
 
 interface TestState {
@@ -333,7 +334,7 @@ describe('HostedSimulation', () => {
     vi.advanceTimersByTime(500);
     expect(broadcast).toHaveBeenCalled();
     for (const [, options] of broadcast.mock.calls) {
-      expect(options).toEqual({ coalesce: 'sim:snapshot' });
+      expect(options?.coalesce).toBe('sim:snapshot');
     }
   });
 
@@ -504,6 +505,40 @@ describe('HostedSimulation snapshot deltas', () => {
     net.openLink('a', 'b');
     expect(sims.b.getTick()).toBe(sims.a.getTick());
     expect(JSON.stringify(sims.b.getState())).toBe(JSON.stringify(sims.a.getState()));
+  });
+
+  it('gives a congested peer a keyframe in place of deltas it would miss the base of', () => {
+    const { net, rooms, sims } = setup(['a', 'b'], { keyframeInterval: 60 });
+    // a's link to b, through a real Outbox on a channel that congests on demand.
+    const channel: DataChannelLike & { bufferedAmount: number } = {
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      onbufferedamountlow: null,
+      send: (frame) => net.inject('a', 'b', JSON.parse(frame as string).data),
+    };
+    const outbox = new Outbox(channel, 1000, () => 1_000_000);
+    rooms.a.broadcast = (message, sendOptions) => outbox.send(JSON.stringify(message), sendOptions);
+    rooms.a.sendToPeer = (_, message, sendOptions) =>
+      outbox.send(JSON.stringify(message), sendOptions);
+    const resync = vi.fn();
+    rooms.a.onMessage(({ data }) => {
+      if ((data as { ch?: string }).ch === 'sim:resync') resync();
+    });
+    vi.advanceTimersByTime(500);
+    expect(sims.b.getTick()).toBe(sims.a.getTick());
+
+    channel.bufferedAmount = 1_000_000;
+    vi.advanceTimersByTime(600);
+    const stuck = sims.b.getTick();
+    expect(stuck).toBeLessThan(sims.a.getTick());
+    channel.bufferedAmount = 0;
+    channel.onbufferedamountlow?.call(undefined as never, new Event('bufferedamountlow'));
+    expect(sims.b.getTick()).toBe(sims.a.getTick());
+    expect(JSON.stringify(sims.b.getState())).toBe(JSON.stringify(sims.a.getState()));
+    // Later deltas build on that keyframe.
+    vi.advanceTimersByTime(500);
+    expect(sims.b.getTick()).toBe(sims.a.getTick());
+    expect(resync).not.toHaveBeenCalled();
   });
 
   it('starts a new host term with a keyframe', () => {
