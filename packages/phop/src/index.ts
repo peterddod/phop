@@ -31,6 +31,7 @@ export type {
   SignalingEvent,
   SignalingSession,
 } from './core/transport';
+export { PROTOCOL_VERSION } from './core/wire';
 export {
   type LobbyPhase,
   type Match,

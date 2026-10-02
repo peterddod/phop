@@ -1,23 +1,49 @@
 import type { SendOptions } from '../types';
 
 /**
- * Framing between a room and a data channel: splitting messages larger than
- * the channel's maximum message size into ordered chunks, reassembling them,
+ * Framing between a room and a data channel: a protocol handshake, deflate
+ * compression of large messages, splitting messages larger than the
+ * channel's maximum message size into ordered chunks, reassembling them,
  * and holding back superseded messages while a channel is congested.
+ *
+ * Each side's first frame is a hello naming its protocol version
+ * (`{"phop":2,"deflate":true}`); a peer on another version, or one that
+ * sends anything else first (phop 1.x had no hello), is incompatible and
+ * ignored from then on.
  *
  * A message is sent as its JSON text. One too large for a single send goes
  * as chunk frames: `CHUNK_MARK id,index,count,` followed by part of the text.
- * JSON text never starts with the mark, so the two can't be confused. Data
- * channels are ordered and reliable, so a message's chunks arrive in order
- * and back to back.
+ * JSON text never starts with the mark, so the two can't be confused. Once
+ * the peer's hello says it can inflate, a message of `COMPRESS_MIN_LENGTH`
+ * characters or more goes as a binary frame instead: `BINARY_WHOLE`
+ * followed by its deflate-raw bytes, or, if that is still too large,
+ * `BINARY_CHUNK` frames carrying `id,index,count` as three little-endian
+ * u32s and then part of the bytes. Compression is asynchronous, so later
+ * messages wait for it and every message keeps its place. Data channels are
+ * ordered and reliable, so a message's chunks arrive in order and back to
+ * back.
  */
+
+/**
+ * The wire protocol version. Peers only talk to peers on the same version.
+ * 1 was phop 1.x, which had no hello; 2 added the hello, compressed binary
+ * frames and hosted-simulation snapshot deltas.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /** SCTP's maximum message size where the transport doesn't report one. */
 export const DEFAULT_MAX_MESSAGE_SIZE = 256 * 1024;
 /** Buffered bytes above which coalescable messages are held back. */
 export const DEFAULT_MAX_BUFFERED_AMOUNT = 256 * 1024;
 
+/** Messages at least this long (in UTF-16 units) are compressed. */
+export const COMPRESS_MIN_LENGTH = 2048;
+
 const CHUNK_MARK = '\u0001';
+const BINARY_WHOLE = 1;
+const BINARY_CHUNK = 2;
+// Kind byte plus id, index and count as u32s.
+const BINARY_CHUNK_HEADER = 13;
 // The mark, then `id,index,count,`.
 const CHUNK_HEADER = /^.([0-9a-z]+),(\d+),(\d+),/s;
 // Room for the chunk header (mark, id, index, count) in each chunk's budget.
@@ -31,7 +57,7 @@ export interface DataChannelLike {
   readonly bufferedAmount: number;
   bufferedAmountLowThreshold: number;
   onbufferedamountlow: ((this: never, event: Event) => unknown) | null;
-  send(data: string): void;
+  send(data: string | Uint8Array<ArrayBuffer>): void;
 }
 
 /** The usable maximum message size, given what the transport reports. */
@@ -147,14 +173,186 @@ export class FrameReassembler {
   }
 }
 
+// ---------------------------------------------------------------------
+// Compression and binary frames
+// ---------------------------------------------------------------------
+
+/** Whether this environment can compress messages it sends. */
+export function canDeflate(): boolean {
+  return typeof CompressionStream === 'function';
+}
+
+/** Whether this environment can decompress messages it receives. */
+export function canInflate(): boolean {
+  return typeof DecompressionStream === 'function';
+}
+
+async function pipeBytes(
+  stream: CompressionStream | DecompressionStream,
+  input: Uint8Array<ArrayBuffer>,
+  maxOutput: number
+): Promise<Uint8Array<ArrayBuffer>> {
+  const writer = stream.writable.getWriter();
+  // Failures surface on the reading side too.
+  writer.write(input).catch(() => {});
+  writer.close().catch(() => {});
+  const reader = stream.readable.getReader();
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxOutput) {
+      reader.cancel().catch(() => {});
+      throw new RangeError('phop: inflated message is too large');
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+let lastDeflated: { text: string; bytes: Promise<Uint8Array<ArrayBuffer>> } | null = null;
+
+/** `text` as deflate-raw bytes. A broadcast compresses the same text once. */
+export function deflateText(text: string): Promise<Uint8Array<ArrayBuffer>> {
+  if (lastDeflated?.text === text) return lastDeflated.bytes;
+  const bytes = pipeBytes(
+    new CompressionStream('deflate-raw'),
+    new TextEncoder().encode(text),
+    Number.POSITIVE_INFINITY
+  );
+  lastDeflated = { text, bytes };
+  return bytes;
+}
+
+/** The text in deflate-raw `bytes`. Rejects on corrupt or oversized data. */
+export async function inflateText(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const out = await pipeBytes(
+    new DecompressionStream('deflate-raw'),
+    bytes,
+    MAX_REASSEMBLED_LENGTH
+  );
+  return new TextDecoder().decode(out);
+}
+
+/** Split compressed bytes into binary frames of at most `maxBytes` each. */
+export function encodeBinaryFrames(
+  bytes: Uint8Array<ArrayBuffer>,
+  maxBytes: number
+): Uint8Array<ArrayBuffer>[] {
+  if (bytes.byteLength + 1 <= maxBytes) {
+    const frame = new Uint8Array(bytes.byteLength + 1);
+    frame[0] = BINARY_WHOLE;
+    frame.set(bytes, 1);
+    return [frame];
+  }
+  const budget = Math.max(maxBytes - BINARY_CHUNK_HEADER, 1);
+  const count = Math.ceil(bytes.byteLength / budget);
+  const id = nextMessageId++ >>> 0;
+  const frames: Uint8Array<ArrayBuffer>[] = [];
+  for (let index = 0; index < count; index++) {
+    const part = bytes.subarray(index * budget, (index + 1) * budget);
+    const frame = new Uint8Array(BINARY_CHUNK_HEADER + part.byteLength);
+    const view = new DataView(frame.buffer);
+    view.setUint8(0, BINARY_CHUNK);
+    view.setUint32(1, id, true);
+    view.setUint32(5, index, true);
+    view.setUint32(9, count, true);
+    frame.set(part, BINARY_CHUNK_HEADER);
+    frames.push(frame);
+  }
+  return frames;
+}
+
+/** A received binary frame as bytes, or null if it isn't binary. */
+function toBytes(frame: unknown): Uint8Array<ArrayBuffer> | null {
+  if (Object.prototype.toString.call(frame) === '[object ArrayBuffer]') {
+    return new Uint8Array(frame as ArrayBuffer);
+  }
+  if (ArrayBuffer.isView(frame)) {
+    return new Uint8Array(frame.buffer as ArrayBuffer, frame.byteOffset, frame.byteLength);
+  }
+  return null;
+}
+
+/** `FrameReassembler` for binary frames: returns a whole message's compressed bytes. */
+export class BinaryReassembler {
+  private partial: {
+    id: number;
+    next: number;
+    count: number;
+    parts: Uint8Array<ArrayBuffer>[];
+    length: number;
+  } | null = null;
+
+  push(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> | null {
+    const kind = frame.byteLength > 0 ? frame[0] : -1;
+    if (kind === BINARY_WHOLE) {
+      this.partial = null;
+      return frame.subarray(1);
+    }
+    if (kind !== BINARY_CHUNK || frame.byteLength < BINARY_CHUNK_HEADER) {
+      this.partial = null;
+      return null;
+    }
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    const id = view.getUint32(1, true);
+    const index = view.getUint32(5, true);
+    const count = view.getUint32(9, true);
+    const part = frame.subarray(BINARY_CHUNK_HEADER);
+    if (index === 0) {
+      this.partial =
+        count > 0 && count <= MAX_CHUNKS ? { id, next: 0, count, parts: [], length: 0 } : null;
+    }
+    const partial = this.partial;
+    if (!partial || partial.id !== id || partial.next !== index || partial.count !== count) {
+      this.partial = null;
+      return null;
+    }
+    partial.length += part.byteLength;
+    if (partial.length > MAX_REASSEMBLED_LENGTH) {
+      this.partial = null;
+      return null;
+    }
+    partial.parts.push(part);
+    partial.next++;
+    if (partial.next < count) return null;
+    this.partial = null;
+    const out = new Uint8Array(partial.length);
+    let offset = 0;
+    for (const p of partial.parts) {
+      out.set(p, offset);
+      offset += p.byteLength;
+    }
+    return out;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Outgoing and incoming sides
+// ---------------------------------------------------------------------
+
 /**
- * One peer's outgoing side: frames each message for the channel's maximum
- * message size and, while more than `maxBufferedAmount` bytes are queued,
- * holds coalescable messages back, keeping only the newest per key. Held
- * messages go out once the channel drains below the threshold.
+ * One peer's outgoing side: compresses large messages (once `compress` is
+ * set), frames each message for the channel's maximum message size and,
+ * while more than `maxBufferedAmount` bytes are queued, holds coalescable
+ * messages back, keeping only the newest per key. Held messages go out once
+ * the channel drains below the threshold.
  */
 export class Outbox {
   private readonly held = new Map<string, string>();
+  // Messages waiting behind a compression in progress, in send order.
+  private readonly queue: string[] = [];
+  private pumping = false;
+  /** Compress large messages. Set once the peer says it can inflate them. */
+  compress = false;
 
   constructor(
     private readonly channel: DataChannelLike,
@@ -172,7 +370,8 @@ export class Outbox {
   }
 
   /**
-   * Send `text` (a JSON message). Throws if the channel refuses it. A message
+   * Send `text` (a JSON message). Throws if the channel refuses it, unless
+   * it waits behind a compression, which logs failures instead. A message
    * without a key is never held, so it may overtake held ones.
    */
   send(text: string, options?: SendOptions): void {
@@ -183,7 +382,7 @@ export class Outbox {
       this.held.set(key, text);
       return;
     }
-    this.write(text);
+    this.enqueue(text);
   }
 
   private congested(): boolean {
@@ -194,25 +393,69 @@ export class Outbox {
     if (this.congested()) return;
     const held = [...this.held.values()];
     this.held.clear();
-    for (const text of held) this.write(text);
+    for (const text of held) this.enqueue(text);
   }
 
-  private write(text: string): void {
+  private compresses(text: string): boolean {
+    return this.compress && text.length >= COMPRESS_MIN_LENGTH && canDeflate();
+  }
+
+  private enqueue(text: string): void {
+    if (this.pumping) {
+      this.queue.push(text);
+      return;
+    }
+    if (!this.compresses(text)) {
+      this.writeText(text);
+      return;
+    }
+    this.queue.push(text);
+    this.pumping = true;
+    void this.pump();
+  }
+
+  private async pump(): Promise<void> {
+    try {
+      while (this.queue.length > 0) {
+        const text = this.queue.shift() as string;
+        try {
+          if (this.compresses(text)) {
+            const bytes = await deflateText(text);
+            for (const frame of encodeBinaryFrames(bytes, this.maxMessageSize())) {
+              this.channel.send(frame);
+            }
+          } else {
+            this.writeText(text);
+          }
+        } catch (error) {
+          console.error('phop: sending a message failed:', error);
+        }
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private writeText(text: string): void {
     for (const frame of encodeFrames(text, this.maxMessageSize())) this.channel.send(frame);
   }
 }
 
 /**
- * One peer's incoming side: reassembles frames and parses them. Malformed
- * data is dropped rather than thrown into the channel's event handler.
+ * One peer's incoming side: reassembles and inflates frames and parses
+ * them, delivering messages in the order they were sent. Malformed data is
+ * dropped rather than thrown into the channel's event handler.
  */
 export function createInbox(
   onMessage: (message: Record<string, unknown>) => void
 ): (frame: unknown) => void {
-  const reassembler = new FrameReassembler();
-  return (frame) => {
-    if (typeof frame !== 'string') return;
-    const text = reassembler.push(frame);
+  const texts = new FrameReassembler();
+  const binaries = new BinaryReassembler();
+  // Messages still inflating; later ones wait behind them.
+  let waiting = 0;
+  let chain: Promise<void> = Promise.resolve();
+
+  const deliver = (text: string | null) => {
     if (text === null) return;
     let message: unknown;
     try {
@@ -220,8 +463,124 @@ export function createInbox(
     } catch {
       return;
     }
-    if (typeof message === 'object' && message !== null) {
+    if (typeof message !== 'object' || message === null) return;
+    try {
       onMessage(message as Record<string, unknown>);
+    } catch (error) {
+      console.error('phop: handling a message failed:', error);
     }
+  };
+
+  return (frame) => {
+    let item: string | Promise<string> | null;
+    if (typeof frame === 'string') {
+      item = texts.push(frame);
+    } else {
+      const bytes = toBytes(frame);
+      const whole = bytes && binaries.push(bytes);
+      item = whole && canInflate() ? inflateText(whole) : null;
+    }
+    if (item === null) return;
+    if (typeof item === 'string' && waiting === 0) {
+      deliver(item);
+      return;
+    }
+    waiting++;
+    // A message that fails to inflate is dropped; the ones after still arrive.
+    const text = Promise.resolve(item).catch(() => null);
+    chain = chain
+      .then(() => text)
+      .then((t) => {
+        waiting--;
+        deliver(t);
+      });
+  };
+}
+
+interface Hello {
+  phop: number;
+  deflate?: unknown;
+}
+
+function parseHello(frame: unknown): Hello | null {
+  if (typeof frame !== 'string' || !frame.startsWith('{')) return null;
+  try {
+    const hello: unknown = JSON.parse(frame);
+    if (typeof hello !== 'object' || hello === null) return null;
+    const { phop } = hello as { phop?: unknown };
+    return Number.isSafeInteger(phop) ? (hello as Hello) : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface WireLinkOptions {
+  channel: DataChannelLike;
+  maxBufferedAmount: number;
+  maxMessageSize: () => number;
+  onMessage: (message: Record<string, unknown>) => void;
+  /** The peer's hello arrived and it speaks our protocol. */
+  onReady?: () => void;
+  /**
+   * The peer speaks another protocol version (1 for phop 1.x). Nothing more
+   * is sent to it or taken from it.
+   */
+  onIncompatible?: (protocol: number) => void;
+  /** The version we speak. Default `PROTOCOL_VERSION`; others are for tests. */
+  protocol?: number;
+}
+
+/**
+ * Both sides of one peer's channel plus the protocol handshake. Call `open`
+ * when the channel opens and pass every received frame to `receive`.
+ */
+export class WireLink {
+  private readonly outbox: Outbox;
+  private readonly inbox: (frame: unknown) => void;
+  private helloSent = false;
+  private peer: 'unknown' | 'compatible' | 'incompatible' = 'unknown';
+
+  private readonly protocol: number;
+
+  constructor(private readonly options: WireLinkOptions) {
+    this.protocol = options.protocol ?? PROTOCOL_VERSION;
+    this.outbox = new Outbox(options.channel, options.maxBufferedAmount, options.maxMessageSize);
+    this.inbox = createInbox(options.onMessage);
+  }
+
+  /** Send our hello. Always the first frame on the channel. */
+  open(): void {
+    if (this.helloSent) return;
+    this.helloSent = true;
+    const hello: Hello = { phop: this.protocol, deflate: canInflate() };
+    this.options.channel.send(JSON.stringify(hello));
+  }
+
+  /** Send a serialised message. May throw if the channel refuses it. */
+  send(text: string, options?: SendOptions): void {
+    if (this.peer === 'incompatible') return;
+    this.open();
+    this.outbox.send(text, options);
+  }
+
+  receive = (frame: unknown): void => {
+    if (this.peer === 'compatible') {
+      this.inbox(frame);
+      return;
+    }
+    if (this.peer === 'incompatible') return;
+    const hello = parseHello(frame);
+    if (hello?.phop === this.protocol) {
+      this.peer = 'compatible';
+      this.outbox.compress = hello.deflate === true;
+      this.options.onReady?.();
+      return;
+    }
+    this.peer = 'incompatible';
+    const protocol = hello ? hello.phop : 1;
+    console.warn(
+      `phop: a peer speaks protocol ${protocol}, this build speaks ${this.protocol}; ignoring it`
+    );
+    this.options.onIncompatible?.(protocol);
   };
 }

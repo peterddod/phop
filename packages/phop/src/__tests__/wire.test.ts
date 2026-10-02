@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  BinaryReassembler,
   createInbox,
   type DataChannelLike,
+  deflateText,
+  encodeBinaryFrames,
   encodeFrames,
   FrameReassembler,
   maxMessageSizeOf,
   Outbox,
+  PROTOCOL_VERSION,
   utf8Length,
+  WireLink,
 } from '../core/wire';
 
 function reassemble(frames: string[]): (string | null)[] {
@@ -21,7 +26,8 @@ class FakeChannel implements DataChannelLike {
   onbufferedamountlow: ((this: never, event: Event) => unknown) | null = null;
   sent: string[] = [];
 
-  send(data: string) {
+  send(data: string | Uint8Array<ArrayBuffer>) {
+    if (typeof data !== 'string') throw new Error('unexpected binary frame');
     this.sent.push(data);
     this.bufferedAmount += utf8Length(data);
   }
@@ -161,5 +167,122 @@ describe('Outbox', () => {
     expect(() => channel.drain()).not.toThrow();
     expect(error).toHaveBeenCalled();
     error.mockRestore();
+  });
+});
+
+/** Pseudo-random text that deflate can't shrink much, to force binary chunks. */
+function noise(length: number): string {
+  let x = 1;
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    x = (Math.imul(x, 1103515245) + 12345) >>> 0;
+    out += String.fromCharCode(33 + ((x >>> 16) % 90));
+  }
+  return out.replace(/["\\]/g, 'x');
+}
+
+/** Two wire links joined by channels that deliver asynchronously, in order. */
+function linkPair(maxMessageSize = 1_000_000, foreignHello?: string) {
+  const received: { a: unknown[]; b: unknown[] } = { a: [], b: [] };
+  const frames: { a: unknown[]; b: unknown[] } = { a: [], b: [] };
+  const events: string[] = [];
+  const make = (self: 'a' | 'b', other: 'a' | 'b') => {
+    const channel: DataChannelLike = {
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      onbufferedamountlow: null,
+      send: (data) => {
+        frames[other].push(data);
+        queueMicrotask(() => links[other].receive(data));
+      },
+    };
+    return new WireLink({
+      channel,
+      maxBufferedAmount: 1_000_000,
+      maxMessageSize: () => maxMessageSize,
+      onMessage: (m) => received[self].push(m),
+      onReady: () => events.push(`${self}:ready`),
+      onIncompatible: (protocol) => events.push(`${self}:incompatible:${protocol}`),
+    });
+  };
+  const links: { a: WireLink; b: WireLink } = { a: make('a', 'b'), b: make('b', 'a') };
+  if (foreignHello === undefined) links.b.open();
+  else queueMicrotask(() => links.a.receive(foreignHello));
+  links.a.open();
+  return { links, received, frames, events };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+describe('wire link', () => {
+  it('exchanges hellos, then compresses large messages and keeps their order', async () => {
+    const { links, received, frames, events } = linkPair();
+    await settle();
+    expect(events.sort()).toEqual(['a:ready', 'b:ready']);
+    const big = { big: 'abc'.repeat(5000) };
+    links.a.send(JSON.stringify(big));
+    links.a.send('{"small":1}');
+    links.a.send(JSON.stringify({ big2: 'xyz'.repeat(5000) }));
+    links.a.send('{"small":2}');
+    await settle();
+    expect(received.b).toEqual([big, { small: 1 }, { big2: 'xyz'.repeat(5000) }, { small: 2 }]);
+    const binary = frames.b.filter((f) => typeof f !== 'string') as Uint8Array[];
+    expect(binary).toHaveLength(2);
+    expect(binary[0].byteLength).toBeLessThan(1000);
+    // The hello is the first frame.
+    expect(JSON.parse(frames.b[0] as string)).toEqual({ phop: PROTOCOL_VERSION, deflate: true });
+  });
+
+  it('chunks compressed messages larger than the maximum message size', async () => {
+    const { links, received, frames } = linkPair(4096);
+    await settle();
+    const text = noise(50_000);
+    links.a.send(JSON.stringify({ text }));
+    links.a.send('"after"');
+    await settle();
+    expect(received.b).toEqual([{ text }]);
+    const binary = frames.b.filter((f) => typeof f !== 'string') as Uint8Array[];
+    expect(binary.length).toBeGreaterThan(5);
+    for (const frame of binary) expect(frame.byteLength).toBeLessThanOrEqual(4096);
+  });
+
+  it('flags a peer on another protocol and ignores it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { links, received, events } = linkPair(1_000_000, JSON.stringify({ phop: 99 }));
+    await settle();
+    expect(events).toContain('a:incompatible:99');
+    links.a.receive('{"data":"ignored"}');
+    expect(received.a).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it('treats a peer whose first frame is not a hello as phop 1.x', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { events } = linkPair(1_000_000, '{"senderId":"x","data":1,"timestamp":0}');
+    await settle();
+    expect(events).toContain('a:incompatible:1');
+    warn.mockRestore();
+  });
+
+  it('drops a corrupt compressed message and delivers the next', async () => {
+    const received: unknown[] = [];
+    const receive = createInbox((m) => received.push(m));
+    receive(new Uint8Array([1, 0xff, 0xfe, 0x00, 0x13]));
+    const [frame] = encodeBinaryFrames(await deflateText('{"ok":1}'), 1000);
+    receive(frame);
+    receive('{"plain":2}');
+    await settle();
+    expect(received).toEqual([{ ok: 1 }, { plain: 2 }]);
+  });
+
+  it('drops binary chunks out of sequence', () => {
+    const bytes = new Uint8Array(5000).map((_, i) => i % 251);
+    const frames = encodeBinaryFrames(bytes, 1000);
+    const reassembler = new BinaryReassembler();
+    expect(reassembler.push(frames[0])).toBeNull();
+    expect(reassembler.push(frames[2])).toBeNull();
+    const out = frames.map((f) => reassembler.push(f));
+    expect(Array.from(out[out.length - 1] ?? [])).toEqual(Array.from(bytes));
+    expect(reassembler.push(new Uint8Array([2, 0, 0]))).toBeNull();
   });
 });

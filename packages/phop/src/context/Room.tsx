@@ -10,8 +10,18 @@ import type { JSONSerializable, Message, MessageHandler, SendOptions } from '../
 export interface RoomContextValue {
   roomId: string;
   peerId: string;
-  /** Deduplicated signalling membership of the room, including self. */
+  /**
+   * Deduplicated signalling membership of the room, including self, without
+   * `incompatiblePeers`.
+   */
   peers: string[];
+  /**
+   * Peers in the room that speak another wire protocol version
+   * (`PROTOCOL_VERSION`), e.g. a different phop release. They are left out
+   * of `peers` and nothing is exchanged with them; show them to the user
+   * (e.g. "update to play with X"). Optional for custom providers.
+   */
+  incompatiblePeers?: string[];
   /**
    * `peers` without self. Always set by `<Room>`; optional so custom
    * providers written against 1.x still type-check (`useRoom` fills it in).
@@ -91,6 +101,7 @@ export function Room({
   const [peerId, setPeerId] = useState<string>('');
   const [peers, setPeers] = useState<string[]>([]);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
+  const [incompatible, setIncompatible] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const signalingClientRef = useRef<SignalingSession | null>(null);
@@ -199,6 +210,7 @@ export function Room({
         connectionsRef.current.clear();
         connectedRef.current.clear();
         setConnectedPeers([]);
+        setIncompatible([]);
         client.disconnect();
       };
     },
@@ -247,6 +259,10 @@ export function Room({
             if (connectionsRef.current.get(closedRemotePeerId) !== connection) return;
             markDisconnected(closedRemotePeerId);
           },
+          onIncompatible: (foreignPeerId) => {
+            if (connectionsRef.current.get(foreignPeerId) !== connection) return;
+            setIncompatible((ids) => (ids.includes(foreignPeerId) ? ids : [...ids, foreignPeerId]));
+          },
         });
 
         connectionsRef.current.set(remotePeerId, connection);
@@ -258,6 +274,10 @@ export function Room({
           connectionsRef.current.delete(remotePeerId);
           markDisconnected(remotePeerId);
         }
+      });
+      setIncompatible((ids) => {
+        const present = ids.filter((id) => peers.includes(id));
+        return present.length === ids.length ? ids : present;
       });
     },
     [peers, peerId, markConnected, markDisconnected]
@@ -325,13 +345,21 @@ export function Room({
     []
   );
 
-  const remotePeers = useMemo(() => peers.filter((p) => p !== peerId), [peers, peerId]);
+  const compatiblePeers = useMemo(
+    () => (incompatible.length === 0 ? peers : peers.filter((p) => !incompatible.includes(p))),
+    [peers, incompatible]
+  );
+  const remotePeers = useMemo(
+    () => compatiblePeers.filter((p) => p !== peerId),
+    [compatiblePeers, peerId]
+  );
 
   const contextValue: RoomContextValue = {
     roomId,
     peerId,
-    peers,
+    peers: compatiblePeers,
     remotePeers,
+    incompatiblePeers: incompatible,
     connectedPeers,
     isConnected,
     broadcast,

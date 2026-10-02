@@ -65,6 +65,31 @@ test.describe('hosted game', () => {
     await Promise.all(peers.map((p) => p.close()));
   });
 
+  test('clients hold the host state byte for byte (compressed keyframes and deltas)', async ({
+    browser,
+  }) => {
+    const peers = await createRoom(browser, 3, { game: true });
+    await startMatch(peers);
+    await Promise.all(peers.map((p) => game.waitForTick(p.page, 30)));
+
+    const ids = await Promise.all(peers.map((p) => p.peerId()));
+    const hostId = await game.hostId(peers[0].page);
+    const host = peers[ids.indexOf(hostId as string)];
+    for (const client of peers.filter((p) => p !== host)) {
+      // Sample several ticks: keyframes come every 10, deltas in between.
+      for (let i = 0; i < 5; i++) {
+        const snap = await client.page.evaluate(() => window.__game.snapshot());
+        expect(snap).not.toBeNull();
+        const { tick, json } = snap as { tick: number; json: string };
+        const expected = await host.page.evaluate((t) => window.__game.hostState(t), tick);
+        expect(json).toBe(expected);
+        await game.waitForTick(client.page, tick + 3);
+      }
+    }
+
+    await Promise.all(peers.map((p) => p.close()));
+  });
+
   test('late joiner sees the match in progress', async ({ browser }) => {
     const peers = await createRoom(browser, 2, { game: true });
     await startMatch(peers);
