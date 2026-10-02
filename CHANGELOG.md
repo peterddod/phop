@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/peterddod/phop/compare/v1.8.0...v1.8.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **phop:** send a congested peer keyframes in place of deltas it can't apply ([bf8c136](https://github.com/peterddod/phop/commit/bf8c1366bbf201cb4608c51cfe32cb9d8747cdc9))
+
 # [1.8.0](https://github.com/peterddod/phop/compare/v1.7.0...v1.8.0) (2026-10-02)
 
 
