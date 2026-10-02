@@ -24,6 +24,12 @@ export {
   type StrategyContext,
 } from './core/merge-strategies';
 export { type RoomHandle, SharedStateController } from './core/SharedStateController';
+export {
+  createHostedSimulationWorker,
+  type HostedSimulationWorkerOptions,
+  type SimulationWorker,
+  type SimulationWorkerScope,
+} from './core/simulation-worker';
 export type {
   PeerLink,
   PeerLinkOptions,

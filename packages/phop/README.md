@@ -214,6 +214,19 @@ const { getState, dispatch, tick, version, isHost, hostId } = useHostedSimulatio
 - **Slow peers.** Snapshots are coalescable: a peer whose data channel is backed up skips stale snapshots and gets the newest once it drains, as a keyframe when it skipped any (a delta needs the snapshot before it), rather than falling further behind. Resync keyframes are coalesced the same way. A failing send never stops the host's own loop.
 - **Hidden tabs.** The loop runs on a worker timer, so it keeps going when the host's tab is hidden.
 - **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta`, `maxCatchUp` and `keyframeInterval`.
+- **Stepping in a Web Worker.** Pass `worker`, a factory for a module worker that serves the loop with `createHostedSimulationWorker` from `@peterddod/phop/worker` (an entry point without React). While this peer is host, the worker holds the state, steps it on its own timer (including catch-up bursts), and serialises and compresses each snapshot; the main thread only forwards inputs, sends the encoded snapshots and applies the worker's changes to its copy of the state, the way a client applies a delta, as soon as each frame is stepped (the snapshot follows once compressed). That copy is what `getState` returns, and it is never mutated in place. On promotion the worker starts from the main thread's state, a handover the new host adopts restarts it from that state, and on demotion it is stopped and the main thread's copy is handed over. Off by default; the state must be plain JSON. If the factory throws or the worker fails, the host steps on the main thread with `step` instead, from the last frame it applied and with every input the worker hadn't stepped into that frame, so keep both.
+
+```ts
+// sim.worker.ts
+import { createHostedSimulationWorker } from '@peterddod/phop/worker';
+createHostedSimulationWorker<State, Command>({ step: advance, isRunning }); // same step, isRunning and getId as below
+
+// component
+useHostedSimulation<State, Command>('match', {
+  ...options, // step, isRunning and getId as before: the fallback
+  worker: () => new Worker(new URL('./sim.worker.ts', import.meta.url), { type: 'module' }),
+});
+```
 
 `key`, `players` and `init` are read once per mount. Remount to start a new simulation. `HostedSimulation` is the same thing without React.
 

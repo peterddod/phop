@@ -5,41 +5,12 @@ import {
   useLobby,
 } from '@peterddod/phop';
 import { useEffect, useRef } from 'react';
+import { type GameState, initState, stepState } from './gameSim';
 
-interface Unit {
-  id: string;
-  q: number;
-  r: number;
-  hp: number;
-}
-
-interface GameState {
-  count: number;
-  log: string[];
-  /** Bulk, so snapshots are compressed and sent as deltas over real channels. */
-  units: Record<string, Unit>;
-  nextId: number;
-}
-
-function addUnit(state: GameState) {
-  const id = `u${state.nextId++}`;
-  state.units[id] = { id, q: state.nextId % 31, r: state.nextId % 17, hp: 40 };
-}
-
-function initState(): GameState {
-  const state: GameState = { count: 0, log: [], units: {}, nextId: 0 };
-  for (let i = 0; i < 400; i++) addUnit(state);
-  return state;
-}
-
-/** A tenth of the units move each step; one dies and one spawns every few steps. */
-function stepState(state: GameState) {
-  state.count++;
-  const ids = Object.keys(state.units);
-  for (let i = state.count % 10; i < ids.length; i += 10) state.units[ids[i]].q++;
-  if (state.count % 4 === 0) delete state.units[ids[0]];
-  if (state.count % 4 === 2) addUnit(state);
-}
+// `?worker=1`: the host steps in a Web Worker (`gameWorker.ts`).
+const withWorker = new URLSearchParams(window.location.search).get('worker') === '1';
+const startWorker = () =>
+  new Worker(new URL('./gameWorker.ts', import.meta.url), { type: 'module' });
 
 // The host's state after each tick it stepped, to compare clients against.
 const hostHistory = new Map<number, string>();
@@ -56,8 +27,10 @@ interface GameApi {
   state: () => GameState | null;
   /** The state as JSON, with its tick. */
   snapshot: () => { tick: number; json: string } | null;
-  /** The JSON of the state this peer stepped to `tick` while host. */
+  /** The JSON of the state this peer stepped to `tick` while host (not in worker mode). */
   hostState: (tick: number) => string | null;
+  /** The JSON of the state after `tick` steps without inputs. */
+  replay: (tick: number) => string;
   dispatch: (input: string) => void;
 }
 
@@ -82,13 +55,13 @@ function SimProbe({
     players,
     init: initState,
     step: (state, inputs) => {
-      stepState(state);
-      for (const { playerId, input } of inputs) state.log.push(`${playerId}:${input}`);
+      stepState(state, inputs);
       hostHistory.set(state.count, JSON.stringify(state));
       hostHistory.delete(state.count - 200);
     },
     validateInput: isString,
     absence: { timeoutMs: 2000, toInput: () => 'resign' },
+    worker: withWorker ? startWorker : undefined,
   });
   simRef.current = sim;
   return null;
@@ -117,6 +90,11 @@ export function GameProbe() {
         return state ? { tick: state.count, json: JSON.stringify(state) } : null;
       },
       hostState: (tick) => hostHistory.get(tick) ?? null,
+      replay: (tick) => {
+        const state = initState();
+        for (let i = 0; i < tick; i++) stepState(state, []);
+        return JSON.stringify(state);
+      },
       dispatch: (input) => simRef.current?.dispatch(input),
     };
   }, []);

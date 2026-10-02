@@ -15,6 +15,11 @@ export interface ChannelRoom {
   onMessage: <TData extends JSONSerializable = JSONSerializable>(
     handler: MessageHandler<TData>
   ) => () => void;
+  /**
+   * `broadcast` for a message already serialised (a JSON `Message`). Rooms
+   * without it get the message parsed and passed to `broadcast`.
+   */
+  broadcastText?: (text: string, options?: SendOptions) => void;
 }
 
 /**
@@ -29,6 +34,11 @@ export interface Channel<T> {
    */
   send(peerId: string, data: T, supersede?: T): void;
   broadcast(data: T, supersede?: T): void;
+  /**
+   * Broadcast a message serialised by `channelMessageText` for this channel,
+   * e.g. in a Web Worker, so the sender skips `JSON.stringify`.
+   */
+  broadcastText(text: string, supersede?: T): void;
   subscribe(handler: (data: T, senderId: string) => void): () => void;
 }
 
@@ -53,6 +63,19 @@ function isEnvelope(value: unknown): value is ChannelEnvelope {
     typeof (value as { ch?: unknown }).ch === 'string' &&
     'd' in value
   );
+}
+
+/**
+ * A channel message as the JSON text a room sends, from its payload's JSON
+ * text. What `Channel.broadcastText` takes.
+ */
+export function channelMessageText(
+  senderId: string,
+  name: string,
+  dataText: string,
+  timestamp = Date.now()
+): string {
+  return `{"senderId":${JSON.stringify(senderId)},"data":{"ch":${JSON.stringify(name)},"d":${dataText}},"timestamp":${timestamp}}`;
 }
 
 /**
@@ -93,6 +116,10 @@ export function createChannel<T>(
     },
     broadcast: (data, supersede) => {
       room.broadcast(wrap(data), sendOptions(supersede));
+    },
+    broadcastText: (text, supersede) => {
+      if (room.broadcastText) room.broadcastText(text, sendOptions(supersede));
+      else room.broadcast(JSON.parse(text) as Message<JSONSerializable>, sendOptions(supersede));
     },
     subscribe: (handler) =>
       room.onMessage(({ senderId, data }) => {

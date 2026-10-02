@@ -8,7 +8,14 @@ import {
   type JsonPatch,
   type JsonValue,
 } from './json-diff';
+import {
+  isFromWorker,
+  type SimulationWorker,
+  type ToWorker,
+  type WorkerConfig,
+} from './simulation-worker';
 import { startTicker } from './ticker';
+import { primeDeflate } from './wire';
 
 /** The room surface a hosted simulation needs. `RoomContextValue` satisfies it. */
 export interface SimulationRoom extends ChannelRoom {
@@ -87,6 +94,24 @@ export interface HostedSimulationOptions<TState, TInput> {
    * a number.
    */
   getId?: (item: unknown, path: (string | number)[]) => string | number | undefined;
+  /**
+   * Step the host's simulation in a Web Worker: a factory for the worker,
+   * whose module calls `createHostedSimulationWorker` (from
+   * `@peterddod/phop/worker`) with the same `step`, `isRunning` and `getId`:
+   *
+   * ```ts
+   * worker: () => new Worker(new URL('./sim.worker.ts', import.meta.url), { type: 'module' })
+   * ```
+   *
+   * While this peer is host, the worker holds the state, steps it on its own
+   * timer and serialises and compresses snapshots; the main thread forwards
+   * inputs, sends the snapshots and keeps a copy of the state (applying the
+   * worker's changes the way a client applies a delta), which `getState`
+   * returns and which is never mutated in place. The state must be plain
+   * JSON. Called on `start()`; if it throws, or the worker fails, the main
+   * thread steps with `step` instead. Read once per `start()`.
+   */
+  worker?: () => SimulationWorker;
 }
 
 /** A full state. `seq` numbers the host's snapshots, keyframes and deltas alike. */
@@ -194,6 +219,24 @@ export class HostedSimulation<TState, TInput> {
   private resyncAskedAt = -Infinity;
   private cleanups: (() => void)[] = [];
 
+  // Worker mode (see `HostedSimulationOptions.worker`): the worker, the term
+  // its frames must carry, whether it holds authority, whether it was last
+  // told to run, and the config it was last sent (as JSON).
+  private worker: SimulationWorker | null = null;
+  private workerTerm = 0;
+  private workerOwns = false;
+  private workerRun = false;
+  private workerConfigText = '';
+  // Inputs sent to the worker that it hasn't reported taking yet, and how
+  // many it had reported taking (see `WorkerFrame.inputs`): lost with the
+  // worker, so they are queued here again if it fails (and ours if it
+  // restarts on reconnecting after a cut-off).
+  private workerInputs: PlayerInput<TInput>[] = [];
+  private workerAcked = 0;
+  // States of the worker's frames whose snapshot messages are still to come, by seq.
+  private readonly workerPending = new Map<number, { tick: number; state: TState }>();
+  private readonly snapshotChannelName: string;
+
   constructor(key: string, options: HostedSimulationOptions<TState, TInput>, room: SimulationRoom) {
     this.room = room;
     this.options = options;
@@ -206,6 +249,9 @@ export class HostedSimulation<TState, TInput> {
         return self.room.peerId;
       },
       broadcast: (message, sendOptions) => this.room.broadcast(message, sendOptions),
+      get broadcastText() {
+        return self.room.broadcastText;
+      },
       sendToPeer: (peerId, message, sendOptions) =>
         this.room.sendToPeer(peerId, message, sendOptions),
       onMessage: (handler) => this.room.onMessage(handler),
@@ -215,7 +261,8 @@ export class HostedSimulation<TState, TInput> {
     );
     // Only the newest snapshot matters, so a congested peer skips stale ones
     // (a delta replacing a held snapshot goes as a keyframe, see broadcastSnapshot).
-    this.snapshotChannel = createChannel(liveRoom, `${key}:snapshot`, this.isSnapshot, {
+    this.snapshotChannelName = `${key}:snapshot`;
+    this.snapshotChannel = createChannel(liveRoom, this.snapshotChannelName, this.isSnapshot, {
       latestOnly: true,
     });
     this.keyframeChannel = createChannel(liveRoom, `${key}:keyframe`, this.isSnapshot);
@@ -247,7 +294,8 @@ export class HostedSimulation<TState, TInput> {
   dispatch = (input: TInput): void => {
     const host = this.hostId;
     if (host === this.room.peerId) {
-      this.localQueue.push(input);
+      if (this.workerOwns) this.sendInputToWorker({ playerId: host, input });
+      else this.localQueue.push(input);
     } else if (host !== null) {
       this.inputChannel.send(host, input);
     }
@@ -266,12 +314,14 @@ export class HostedSimulation<TState, TInput> {
       this.room.onPeerConnected?.(this.handlePeerConnected) ?? (() => {}),
       startTicker(this.options.loopIntervalMs ?? this.dt * 500, (t) => this.frame(t))
     );
+    this.startWorker();
     this.updateHost();
   }
 
   stop(): void {
     for (const cleanup of this.cleanups) cleanup();
     this.cleanups = [];
+    this.dropWorker();
   }
 
   /** Push the latest room fields in. Call whenever the room changes. */
@@ -283,6 +333,7 @@ export class HostedSimulation<TState, TInput> {
   /** Update callbacks and tuning. `players` and `init` are read only once. */
   setOptions(options: HostedSimulationOptions<TState, TInput>): void {
     this.options = options;
+    if (this.workerOwns) this.sendWorkerConfig();
   }
 
   // -------------------------------------------------------------------
@@ -376,6 +427,10 @@ export class HostedSimulation<TState, TInput> {
           ? prevHost
           : null;
       this.remoteQueue = [];
+      // The worker restarts without its queued inputs, except ours, which
+      // are kept (as `localQueue` is) and sent to it again.
+      if (this.workerOwns) this.reclaimWorkerInputs(false);
+      this.workerOwns = false;
       // Nothing from an earlier term is a base for peers: start with a keyframe,
       // and send none to joining peers before our first snapshot of this term.
       this.sent = null;
@@ -398,6 +453,7 @@ export class HostedSimulation<TState, TInput> {
       this.pendingHandover = null;
     }
     this.wasHost = isHost;
+    this.syncWorker();
   }
 
   private sendHandover(): void {
@@ -453,8 +509,13 @@ export class HostedSimulation<TState, TInput> {
   private handleInput = (input: TInput, senderId: string): void => {
     if (this.hostId !== this.room.peerId) return;
     if (!this.players.includes(senderId)) return;
-    this.remoteQueue.push({ playerId: senderId, input });
+    this.queueRemote({ playerId: senderId, input });
   };
+
+  private queueRemote(input: PlayerInput<TInput>): void {
+    if (this.workerOwns) this.sendInputToWorker(input);
+    else this.remoteQueue.push(input);
+  }
 
   private handleSnapshot = (snap: Snapshot<TState>, senderId: string): void => {
     this.updateHost();
@@ -503,6 +564,8 @@ export class HostedSimulation<TState, TInput> {
       // A handover: what peers hold is no base for our next snapshot.
       this.chain = null;
       this.needKeyframe = true;
+      // The worker carries on from it, keeping the inputs it holds.
+      if (this.workerOwns) this.startWorkerTerm(false);
     } else {
       this.chain = { from: senderId, seq: snap.seq };
     }
@@ -607,6 +670,11 @@ export class HostedSimulation<TState, TInput> {
       return;
     }
 
+    if (this.worker) {
+      this.controlWorker(t);
+      return;
+    }
+
     // Hold rather than simulate alone and time everyone out.
     if (this.cutOff) {
       this.hold(t);
@@ -694,9 +762,222 @@ export class HostedSimulation<TState, TInput> {
         this.isActive(p)
       ) {
         const input = absence.toInput(p, this.state);
-        if (input !== null) this.remoteQueue.push({ playerId: p, input });
+        if (input !== null) this.queueRemote({ playerId: p, input });
         this.absenceHandled.add(p);
       }
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Worker mode
+  // -------------------------------------------------------------------
+
+  private startWorker(): void {
+    const factory = this.options.worker;
+    if (!factory || this.worker) return;
+    let worker: SimulationWorker;
+    try {
+      worker = factory();
+    } catch (error) {
+      console.error('phop: starting the simulation worker failed; stepping here instead:', error);
+      return;
+    }
+    worker.addEventListener('message', (event) => this.handleWorkerFrame(worker, event.data));
+    worker.addEventListener('error', (event) => this.handleWorkerError(worker, event));
+    this.worker = worker;
+    this.workerOwns = false;
+  }
+
+  private dropWorker(): void {
+    this.worker?.terminate();
+    this.worker = null;
+    this.workerOwns = false;
+    this.workerTerm++;
+    this.workerInputs = [];
+    this.workerAcked = 0;
+    this.workerPending.clear();
+  }
+
+  private postToWorker(message: ToWorker<TState, TInput>): void {
+    this.worker?.postMessage(message);
+  }
+
+  private sendInputToWorker(input: PlayerInput<TInput>): void {
+    this.workerInputs.push(input);
+    this.postToWorker({ type: 'input', input });
+  }
+
+  /** Stop the worker: it drops its queued inputs and its count of those taken. */
+  private stopWorker(): void {
+    this.postToWorker({ type: 'stop' });
+    this.workerInputs = [];
+    this.workerAcked = 0;
+  }
+
+  /**
+   * Queue the inputs the worker hasn't taken (as far as we know) here again:
+   * ours always, others' only if `remote`.
+   */
+  private reclaimWorkerInputs(remote: boolean): void {
+    const self = this.room.peerId;
+    for (const i of this.workerInputs) {
+      if (i.playerId === self) this.localQueue.push(i.input);
+      else if (remote) this.remoteQueue.push(i);
+    }
+    this.workerInputs = [];
+  }
+
+  private workerConfig(): WorkerConfig {
+    return {
+      dt: this.dt,
+      loopIntervalMs: this.options.loopIntervalMs ?? this.dt * 500,
+      maxFrameDelta: this.options.maxFrameDelta ?? 0.25,
+      maxCatchUp: this.options.maxCatchUp ?? 1,
+      keyframeInterval: this.options.keyframeInterval ?? 1,
+      broadcast: this.isMultiplayer,
+      hostId: this.room.peerId,
+      channel: this.snapshotChannelName,
+    };
+  }
+
+  private sendWorkerConfig(): void {
+    const config = this.workerConfig();
+    const text = JSON.stringify(config);
+    if (text === this.workerConfigText) return;
+    this.workerConfigText = text;
+    this.postToWorker({ type: 'config', config });
+  }
+
+  /** Give the worker authority while we are host, and take it back when we aren't. */
+  private syncWorker(): void {
+    if (!this.worker) return;
+    const isHost = this.hostId !== null && this.hostId === this.room.peerId;
+    if (isHost && !this.workerOwns) {
+      this.stopWorker();
+      this.startWorkerTerm(true);
+    } else if (!isHost && this.workerOwns) {
+      // Our copy of the state is the handover; frames still in flight were
+      // never sent to anyone, so they are dropped with the term.
+      this.stopWorker();
+      this.workerOwns = false;
+      this.workerTerm++;
+      this.workerPending.clear();
+    }
+  }
+
+  /**
+   * Start a worker term from our state. On taking authority, inputs queued
+   * here so far go along (`flush`).
+   */
+  private startWorkerTerm(flush: boolean): void {
+    const config = this.workerConfig();
+    this.workerConfigText = JSON.stringify(config);
+    this.workerTerm++;
+    this.workerOwns = true;
+    this.workerRun = false;
+    this.workerPending.clear();
+    this.postToWorker({
+      type: 'start',
+      term: this.workerTerm,
+      state: this.state,
+      tick: this.tick,
+      seq: this.seq,
+      config,
+    });
+    if (!flush) return;
+    const self = this.room.peerId;
+    for (const input of this.localQueue.splice(0))
+      this.sendInputToWorker({ playerId: self, input });
+    for (const input of this.remoteQueue.splice(0)) this.sendInputToWorker(input);
+  }
+
+  /** `frame` for a host whose worker steps: run it or hold it, and track absences. */
+  private controlWorker(t: number): void {
+    const run =
+      !this.cutOff &&
+      now() >= this.graceUntil &&
+      !this.awaitingHandoverChannel() &&
+      (this.options.isRunning?.(this.state) ?? true);
+    if (this.cutOff) this.absentSince.clear();
+    if (run !== this.workerRun) {
+      this.workerRun = run;
+      this.postToWorker({ type: 'run', run });
+    }
+    if (run && this.isMultiplayer) this.trackAbsence(t);
+  }
+
+  /** Apply a worker frame to our copy of the state, or send a frame's snapshot. */
+  private handleWorkerFrame(worker: SimulationWorker, data: unknown): void {
+    if (worker !== this.worker || !this.workerOwns || !isFromWorker(data)) return;
+    if (data.term !== this.workerTerm) return;
+    if (data.type === 'message') {
+      this.sendWorkerMessage(data.seq, data.message, data.delta, data.deflated);
+      return;
+    }
+    const frame = data;
+    let state: unknown;
+    try {
+      state =
+        frame.stateText !== undefined
+          ? JSON.parse(frame.stateText)
+          : applyJsonPatch(this.state as JsonValue, frame.patch ?? []);
+    } catch (error) {
+      // Can't happen unless frames were lost: restart the worker from our copy.
+      console.error('phop: applying a simulation worker frame failed:', error);
+      this.startWorkerTerm(false);
+      return;
+    }
+    this.workerInputs.splice(0, frame.inputs - this.workerAcked);
+    this.workerAcked = frame.inputs;
+    this.state = state as TState;
+    this.tick = frame.tick;
+    this.lastAppliedTick = frame.tick;
+    this.lastProgressAt = now();
+    this.seq = frame.seq;
+    if (this.isMultiplayer)
+      this.workerPending.set(frame.seq, { tick: frame.tick, state: this.state });
+    this.bump();
+  }
+
+  /** Send the worker's snapshot of frame `seq`, encoded (and maybe compressed) there. */
+  private sendWorkerMessage(
+    seq: number,
+    message: string,
+    delta: boolean | undefined,
+    deflated: Uint8Array<ArrayBuffer> | undefined
+  ): void {
+    const snap = this.workerPending.get(seq);
+    for (const s of this.workerPending.keys()) if (s <= seq) this.workerPending.delete(s);
+    if (!snap) return;
+    const { tick, state } = snap;
+    // Our state may be newer by now: what peers hold after this is the frame's.
+    this.sent =
+      (this.options.keyframeInterval ?? 1) > 0 ? { seq, tick, state: state as JsonValue } : null;
+    if (deflated) primeDeflate(message, deflated);
+    // As in broadcastSnapshot: a peer whose held snapshot a delta replaces
+    // gets the same snapshot in full.
+    const full = delta ? { hostId: this.room.peerId, tick, seq, state } : undefined;
+    try {
+      this.snapshotChannel.broadcastText(message, full);
+    } catch (error) {
+      console.error('phop: broadcasting the snapshot failed:', error);
+    }
+  }
+
+  /** The worker failed (e.g. its module didn't load): step here from our copy instead. */
+  private handleWorkerError(worker: SimulationWorker, event: Event): void {
+    if (worker !== this.worker) return;
+    console.error('phop: the simulation worker failed; stepping here instead:', event);
+    const owned = this.workerOwns;
+    // Inputs it hadn't taken, or took in steps we never saw, are stepped here.
+    if (owned) this.reclaimWorkerInputs(true);
+    this.dropWorker();
+    if (!owned) return;
+    // `step` may mutate it in place, and our copy shares objects with
+    // states already published.
+    this.state = JSON.parse(JSON.stringify(this.state)) as TState;
+    this.needKeyframe = true;
+    this.lastTime = null;
+    this.accumulator = 0;
   }
 }

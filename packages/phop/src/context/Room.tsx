@@ -57,6 +57,11 @@ export interface RoomContextValue {
     message: Message<TData>,
     options?: SendOptions
   ) => void;
+  /**
+   * `broadcast` for a message already serialised as JSON (e.g. by a Web
+   * Worker). Always set by `<Room>`; optional for custom providers.
+   */
+  broadcastText?: (text: string, options?: SendOptions) => void;
   sendToPeer: <TData extends JSONSerializable = JSONSerializable>(
     peerId: string,
     message: Message<TData>,
@@ -358,19 +363,22 @@ export function Room({
     [ownMetadata]
   );
 
+  const broadcastText = useCallback((text: string, options?: SendOptions): void => {
+    connectionsRef.current.forEach((connection, remotePeerId) => {
+      try {
+        connection.send(text, options);
+      } catch (error) {
+        logSendFailure(remotePeerId, error);
+      }
+    });
+  }, []);
+
   const broadcast = useCallback(
     <TData extends JSONSerializable>(message: Message<TData>, options?: SendOptions): void => {
       if (connectionsRef.current.size === 0) return;
-      const text = JSON.stringify(message);
-      connectionsRef.current.forEach((connection, remotePeerId) => {
-        try {
-          connection.send(text, options);
-        } catch (error) {
-          logSendFailure(remotePeerId, error);
-        }
-      });
+      broadcastText(JSON.stringify(message), options);
     },
-    []
+    [broadcastText]
   );
 
   const sendToPeer = useCallback(
@@ -444,6 +452,7 @@ export function Room({
     peerInfo,
     isConnected,
     broadcast,
+    broadcastText,
     sendToPeer,
     onMessage,
     onPeerConnected,
