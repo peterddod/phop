@@ -13,7 +13,8 @@ import type { JSONSerializable, SendOptions } from '../types';
  * may also carry the sender's metadata (`"meta":{...}`, see `PeerMetadata`),
  * and is sent again when it changes. The hello's `phop` and `meta` fields
  * keep their meaning in every version, so peers on different versions still
- * learn each other's version and metadata.
+ * learn each other's version and metadata (a hello too long for this release
+ * still gives its version, with no metadata).
  *
  * A message is sent as its JSON text. One too large for a single send goes
  * as chunk frames: `CHUNK_MARK id,index,count,` followed by part of the text.
@@ -552,15 +553,18 @@ interface Hello {
   meta?: unknown;
 }
 
+// Every release writes `phop` as the hello's first key, so a hello always
+// starts `{"phop":<int>`; keep it that way.
 const HELLO_PREFIX = '{"phop":';
+// The version of a hello too long to parse (a later release's), read from its
+// prefix; its metadata reads as none.
+const OVERSIZED_HELLO = /^\{"phop":(\d{1,9})[,}]/;
 
 function parseHello(frame: unknown): Hello | null {
-  if (
-    typeof frame !== 'string' ||
-    frame.length > MAX_HELLO_LENGTH ||
-    !frame.startsWith(HELLO_PREFIX)
-  ) {
-    return null;
+  if (typeof frame !== 'string' || !frame.startsWith(HELLO_PREFIX)) return null;
+  if (frame.length > MAX_HELLO_LENGTH) {
+    const match = OVERSIZED_HELLO.exec(frame.slice(0, 32));
+    return match ? { phop: Number(match[1]) } : null;
   }
   try {
     const hello: unknown = JSON.parse(frame);
@@ -583,8 +587,9 @@ export interface WireLinkOptions {
   /** The peer's hello arrived and it speaks our protocol. */
   onReady?: () => void;
   /**
-   * The peer speaks another protocol version (1 for phop 1.x). Nothing more
-   * is sent to it or taken from it.
+   * The peer speaks another protocol version (1 for phop 1.x). No messages
+   * are sent to it or taken from it; only hellos (our metadata, theirs via
+   * `onPeerInfo`) still flow with a peer above protocol 1.
    */
   onIncompatible?: (protocol: number) => void;
   /**

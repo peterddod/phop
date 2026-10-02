@@ -20,7 +20,10 @@ export interface Match<TConfig> {
 export interface UseLobbyOptions<TConfig, TMeta extends PeerMetadata = PeerMetadata> {
   /** Guards the start config arriving from the lobby host. */
   validateConfig?: (data: unknown) => data is TConfig;
-  /** Guards each peer's metadata; metadata that fails it reads as null in `peerInfo`. */
+  /**
+   * Guards each peer's metadata; metadata that fails it reads as null in
+   * `peerInfo`. May be passed inline: it is read when peer info changes.
+   */
   validateMetadata?: (data: unknown) => data is TMeta;
 }
 
@@ -79,18 +82,24 @@ export function useLobby<TConfig = undefined, TMeta extends PeerMetadata = PeerM
   );
   const isLobbyHost = peerId !== '' && players[0] === peerId;
 
-  const { validateMetadata } = options;
+  // Read through a ref like validateConfig, so an inline guard doesn't give
+  // peerInfo a new identity every render; it is read when peer info changes.
+  const validateMetadataRef = useRef(options.validateMetadata);
+  validateMetadataRef.current = options.validateMetadata;
+  const hasMetadataGuard = options.validateMetadata !== undefined;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: hasMetadataGuard recomputes when the guard is added or removed
   const peerInfo = useMemo(() => {
-    if (!validateMetadata) return roomPeerInfo as Record<string, PeerInfo<TMeta>>;
+    const validate = validateMetadataRef.current;
+    if (!validate) return roomPeerInfo as Record<string, PeerInfo<TMeta>>;
     const checked: Record<string, PeerInfo<TMeta>> = {};
     for (const [id, info] of Object.entries(roomPeerInfo)) {
       checked[id] = {
         protocol: info.protocol,
-        metadata: info.metadata !== null && validateMetadata(info.metadata) ? info.metadata : null,
+        metadata: info.metadata !== null && validate(info.metadata) ? info.metadata : null,
       };
     }
     return checked;
-  }, [roomPeerInfo, validateMetadata]);
+  }, [roomPeerInfo, hasMetadataGuard]);
 
   const validateConfigRef = useRef(options.validateConfig);
   validateConfigRef.current = options.validateConfig;

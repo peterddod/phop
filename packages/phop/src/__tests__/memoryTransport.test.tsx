@@ -210,6 +210,31 @@ describe('peer metadata over the memory transport', () => {
     await waitFor(() => expect(Object.keys(a.room?.peerInfo ?? {})).toEqual(['peer-0001']));
   });
 
+  it('keeps lobby peerInfo stable across renders with an inline validateMetadata', async () => {
+    const net = createMemoryNetwork();
+    const probe: MetaProbe = { room: null, lobby: null };
+    function InlineGuardView() {
+      probe.lobby = useLobby<undefined, Build>('lobby', {
+        validateMetadata: (d): d is Build => isBuild(d),
+      });
+      return null;
+    }
+    const view = (
+      <Room signallingServerUrl="memory" roomId="meta" transport={net.transport}>
+        <InlineGuardView />
+      </Room>
+    );
+    const { rerender } = render(view);
+    await waitFor(() => expect(probe.lobby?.peerInfo['peer-0001']).toBeDefined());
+    const before = probe.lobby?.peerInfo;
+    rerender(
+      <Room signallingServerUrl="memory" roomId="meta" transport={net.transport}>
+        <InlineGuardView />
+      </Room>
+    );
+    expect(probe.lobby?.peerInfo).toBe(before);
+  });
+
   it('shows the version and metadata of a peer on another protocol', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const net = createMemoryNetwork({

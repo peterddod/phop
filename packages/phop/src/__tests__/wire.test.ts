@@ -432,6 +432,34 @@ describe('peer metadata', () => {
     expect(received.a).toEqual([]);
   });
 
+  it('reads the version of a hello too long to parse, with no metadata', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const infos: PeerInfo[] = [];
+    const incompatible: number[] = [];
+    const link = new WireLink({
+      channel: {
+        bufferedAmount: 0,
+        bufferedAmountLowThreshold: 0,
+        onbufferedamountlow: null,
+        send: () => {},
+      },
+      maxBufferedAmount: 1_000_000,
+      maxMessageSize: () => 1_000_000,
+      onMessage: () => {},
+      onPeerInfo: (info) => infos.push(info),
+      onIncompatible: (protocol) => incompatible.push(protocol),
+    });
+    link.open();
+    // A later release's larger hello still reads as that release.
+    const later = PROTOCOL_VERSION + 1;
+    link.receive(JSON.stringify({ phop: later, meta: { x: 'y'.repeat(2000) } }));
+    expect(infos).toEqual([{ protocol: later, metadata: null }]);
+    expect(incompatible).toEqual([later]);
+    link.receive(JSON.stringify({ phop: later, meta: { buildId: 'b' } }));
+    expect(infos[1]).toEqual({ protocol: later, metadata: { buildId: 'b' } });
+    warn.mockRestore();
+  });
+
   it('normalizes our own metadata and refuses anything else', () => {
     expect(normalizeMetadata({ a: 1, b: undefined })).toEqual({ a: 1 });
     expect(() => normalizeMetadata(['x'])).toThrow(TypeError);
