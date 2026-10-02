@@ -182,7 +182,7 @@ function noise(length: number): string {
 }
 
 /** Two wire links joined by channels that deliver asynchronously, in order. */
-function linkPair(maxMessageSize = 1_000_000, foreignHello?: string) {
+function linkPair(maxMessageSize = 1_000_000, foreignHello?: string, dropFirstToB = false) {
   const received: { a: unknown[]; b: unknown[] } = { a: [], b: [] };
   const frames: { a: unknown[]; b: unknown[] } = { a: [], b: [] };
   const events: string[] = [];
@@ -193,6 +193,8 @@ function linkPair(maxMessageSize = 1_000_000, foreignHello?: string) {
       onbufferedamountlow: null,
       send: (data) => {
         frames[other].push(data);
+        // The first frame to b is lost, as on a channel whose handlers attach late.
+        if (other === 'b' && dropFirstToB && frames.b.length === 1) return;
         queueMicrotask(() => links[other].receive(data));
       },
     };
@@ -228,7 +230,23 @@ describe('wire link', () => {
     expect(binary).toHaveLength(2);
     expect(binary[0].byteLength).toBeLessThan(1000);
     // The hello is the first frame.
-    expect(JSON.parse(frames.b[0] as string)).toEqual({ phop: PROTOCOL_VERSION, deflate: true });
+    expect(JSON.parse(frames.b[0] as string)).toEqual({
+      phop: PROTOCOL_VERSION,
+      deflate: true,
+      ack: false,
+    });
+  });
+
+  it('recovers from a lost hello, delivering messages sent before the handshake', async () => {
+    const { links, received, events } = linkPair(1_000_000, undefined, true);
+    // Sent before b's hello arrives: held, then delivered after the handshake.
+    links.a.send('{"early":1}');
+    await vi.waitFor(() => expect(events).toHaveLength(2));
+    links.a.send('{"late":2}');
+    await vi.waitFor(() => expect(received.b).toHaveLength(2));
+    expect(received.b).toEqual([{ early: 1 }, { late: 2 }]);
+    // The acknowledgements are not delivered as messages.
+    expect(received.a).toEqual([]);
   });
 
   it('chunks compressed messages larger than the maximum message size', async () => {

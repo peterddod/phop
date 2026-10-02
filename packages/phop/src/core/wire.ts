@@ -500,10 +500,14 @@ export function createInbox(
 interface Hello {
   phop: number;
   deflate?: unknown;
+  /** The sender has the receiver's hello. */
+  ack?: unknown;
 }
 
+const HELLO_PREFIX = '{"phop":';
+
 function parseHello(frame: unknown): Hello | null {
-  if (typeof frame !== 'string' || !frame.startsWith('{')) return null;
+  if (typeof frame !== 'string' || !frame.startsWith(HELLO_PREFIX)) return null;
   try {
     const hello: unknown = JSON.parse(frame);
     if (typeof hello !== 'object' || hello === null) return null;
@@ -513,6 +517,9 @@ function parseHello(frame: unknown): Hello | null {
     return null;
   }
 }
+
+// Messages kept while waiting for the peer's hello, beyond which the oldest go.
+const MAX_PENDING = 1024;
 
 export interface WireLinkOptions {
   channel: DataChannelLike;
@@ -533,14 +540,21 @@ export interface WireLinkOptions {
 /**
  * Both sides of one peer's channel plus the protocol handshake. Call `open`
  * when the channel opens and pass every received frame to `receive`.
+ *
+ * A channel's first frames can be lost on the side that didn't create it
+ * (they may arrive before its handlers are attached), so the handshake is
+ * acknowledged: a hello without `ack` is answered with one that has it, and
+ * messages are held until the peer's hello arrives. A v2 peer's first frame
+ * to arrive is therefore always a hello; anything else means phop 1.x.
  */
 export class WireLink {
   private readonly outbox: Outbox;
   private readonly inbox: (frame: unknown) => void;
+  private readonly protocol: number;
   private helloSent = false;
   private peer: 'unknown' | 'compatible' | 'incompatible' = 'unknown';
-
-  private readonly protocol: number;
+  // Messages sent before the peer's hello arrived.
+  private pending: { text: string; options?: SendOptions }[] = [];
 
   constructor(private readonly options: WireLinkOptions) {
     this.protocol = options.protocol ?? PROTOCOL_VERSION;
@@ -548,37 +562,67 @@ export class WireLink {
     this.inbox = createInbox(options.onMessage);
   }
 
-  /** Send our hello. Always the first frame on the channel. */
+  /** Send our hello, once. Call when the channel opens. */
   open(): void {
     if (this.helloSent) return;
+    this.sendHello(this.peer === 'compatible');
+  }
+
+  private sendHello(ack: boolean): void {
     this.helloSent = true;
-    const hello: Hello = { phop: this.protocol, deflate: canInflate() };
+    const hello: Hello = { phop: this.protocol, deflate: canInflate(), ack };
     this.options.channel.send(JSON.stringify(hello));
   }
 
-  /** Send a serialised message. May throw if the channel refuses it. */
+  /**
+   * Send a serialised message. May throw if the channel refuses it. Held
+   * until the peer's hello arrives; dropped if the peer is incompatible.
+   */
   send(text: string, options?: SendOptions): void {
     if (this.peer === 'incompatible') return;
     this.open();
-    this.outbox.send(text, options);
+    if (this.peer === 'compatible') {
+      this.outbox.send(text, options);
+      return;
+    }
+    const key = options?.coalesce;
+    if (key !== undefined) this.pending = this.pending.filter((m) => m.options?.coalesce !== key);
+    if (this.pending.length >= MAX_PENDING) this.pending.shift();
+    this.pending.push({ text, options });
   }
 
   receive = (frame: unknown): void => {
+    if (this.peer === 'incompatible') return;
+    const hello = parseHello(frame);
     if (this.peer === 'compatible') {
+      // A repeated hello (an acknowledgement) is not a message.
+      if (hello) {
+        if (hello.ack !== true) this.sendHello(true);
+        return;
+      }
       this.inbox(frame);
       return;
     }
-    if (this.peer === 'incompatible') return;
-    const hello = parseHello(frame);
     if (hello?.phop === this.protocol) {
       this.peer = 'compatible';
       this.outbox.compress = hello.deflate === true;
-      // In case the channel opened without an open event reaching us.
-      this.open();
+      // Our hello may have been lost (or never sent, if no open event reached
+      // us): answer one that doesn't have it yet.
+      if (hello.ack !== true || !this.helloSent) this.sendHello(true);
+      const pending = this.pending;
+      this.pending = [];
+      for (const { text, options } of pending) {
+        try {
+          this.outbox.send(text, options);
+        } catch (error) {
+          console.error('phop: sending a held message failed:', error);
+        }
+      }
       this.options.onReady?.();
       return;
     }
     this.peer = 'incompatible';
+    this.pending = [];
     const protocol = hello ? hello.phop : 1;
     console.warn(
       `phop: a peer speaks protocol ${protocol}, this build speaks ${this.protocol}; ignoring it`
