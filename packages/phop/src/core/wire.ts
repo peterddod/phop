@@ -7,9 +7,9 @@ import type { SendOptions } from '../types';
  * and holding back superseded messages while a channel is congested.
  *
  * Each side's first frame is a hello naming its protocol version
- * (`{"phop":2,"deflate":true}`); a peer on another version, or one that
- * sends anything else first (phop 1.x had no hello), is incompatible and
- * ignored from then on.
+ * (`{"phop":2,"deflate":true,"ack":false}`; see `WireLink`); a peer on
+ * another version, or one whose first frame to arrive is anything else
+ * (phop 1.x had no hello), is incompatible and ignored from then on.
  *
  * A message is sent as its JSON text. One too large for a single send goes
  * as chunk frames: `CHUNK_MARK id,index,count,` followed by part of the text.
