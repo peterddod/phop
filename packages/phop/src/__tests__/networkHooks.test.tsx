@@ -78,6 +78,7 @@ describe('useRoom', () => {
     expect(result.current.connectedPeers).toEqual(['b']);
     expect(typeof result.current.onPeerDisconnected(() => {})).toBe('function');
     expect(result.current.incompatiblePeers).toEqual([]);
+    expect(result.current.peerInfo).toEqual({});
   });
 });
 

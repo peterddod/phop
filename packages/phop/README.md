@@ -52,10 +52,20 @@ Establishes a WebRTC mesh with all peers in the given room.
 | `rtcConfig` | `RTCConfiguration?` | WebRTC config, e.g. TURN servers. Defaults to Google STUN |
 | `maxBufferedAmount` | `number?` | Bytes queued on a peer's data channel above which coalescable messages (such as `useHostedSimulation` snapshots) are held back, keeping only the newest. Default 256 KiB |
 | `transport` | `RoomTransport?` | How peers connect. Defaults to WebRTC with the signalling server; see [Testing without a network](#testing-without-a-network) |
+| `metadata` | `PeerMetadata?` | A small JSON object every peer sees in `peerInfo`, e.g. `{ buildId, name }`; see **Peer metadata** below |
 
 **Sending.** A broadcast is serialised once for all peers, and a peer whose send fails is logged and skipped without affecting the rest. Messages of 2 KB or more are compressed (deflate-raw via `CompressionStream`) and sent as binary frames, keeping their order with the messages around them. Messages larger than the data channel's maximum message size (`RTCSctpTransport.maxMessageSize`, 256 KiB if unknown) are split into chunks and reassembled in order on arrival, so a large state never fails to send. A message sent with `{ coalesce: key }` (the optional last argument of `broadcast` and `sendToPeer`) is held while that peer's channel has more than `maxBufferedAmount` bytes queued; a newer message with the same key replaces it, and the newest is sent once the channel drains. Add `supersede: () => text` (a serialised `Message`) for a message that builds on the one before it: a peer for whom it replaces a held message gets that text instead.
 
 **Protocol version.** Each peer's first frame on a data channel names its wire protocol version (`PROTOCOL_VERSION`, exported). A peer on another version, including phop 1.x, is left out of `peers` and listed in `incompatiblePeers` instead, and nothing is exchanged with it. Messages to a peer are held until its hello arrives (the handshake is acknowledged, so a lost hello is recovered), and `connectedPeers`/`onPeerConnected` report a peer only after that. Every player in a room must run a phop release with the same protocol version; show `incompatiblePeers` to tell users who needs to update.
+
+**Peer metadata.** `metadata` travels with the hello, so every peer learns it as soon as the data channel opens, and is sent again whenever its value changes (it is compared by value, so passing a new object each render is fine). `useRoom().peerInfo` maps each peer id (self, and every remote peer whose hello has arrived, incompatible ones included) to `{ protocol, metadata }`: its wire protocol version and its metadata, or `null` if it published none. Metadata must be a JSON object of at most `MAX_METADATA_LENGTH` (1024) characters as JSON; anything else is logged and not published, and a peer's metadata that breaks those rules reads as `null`. It is untrusted: validate it before use (`useLobby` takes a `validateMetadata` guard). The hello's version and metadata fields keep their meaning in every release, so a peer on another protocol version still shows its version and metadata (peers on releases before metadata show none, and a hello too long for this release shows its version without metadata), which lets an app tell its users (or itself) that a newer build is in the room:
+
+```tsx
+<Room signallingServerUrl={url} roomId={roomId} metadata={{ buildId: BUILD_ID, name }}>
+
+const { peerInfo } = useRoom();
+const newer = Object.values(peerInfo).some((p) => isNewerBuild(p.metadata?.buildId, BUILD_ID));
+```
 
 ### `useSharedState(key, initialValue, strategy?)`
 
@@ -127,6 +137,7 @@ const {
   remotePeers,    // peers without self
   connectedPeers, // remote peers with an open data channel
   incompatiblePeers, // peers on another protocol version, left out of `peers`
+  peerInfo,       // { [peerId]: { protocol, metadata } }, see "Peer metadata"
   isConnected,    // signalling connection is up (see below)
   broadcast,
   sendToPeer,
@@ -171,14 +182,14 @@ The pure `electHost`, `presentCandidates` and `isCutOff` helpers are exported to
 A pre-match lobby. The lobby host starts the match, and every peer freezes the same roster.
 
 ```tsx
-const { phase, players, isLobbyHost, start, match } = useLobby<{ seed: string }>();
+const { phase, players, isLobbyHost, start, match, peerInfo } = useLobby<{ seed: string }>();
 
 if (phase === 'in-progress') return <p>Match already started</p>;
 if (phase === 'lobby') return isLobbyHost ? <button onClick={() => start({ seed })}>Start</button> : <p>Waiting…</p>;
 return <Game players={match.players} seed={match.config.seed} />;
 ```
 
-Peers who connect once a match is running land in `in-progress`. Pass `validateConfig` to guard the start config. Lobby messages are accepted only from the host of the roster they carry, as seen from your own view of the room.
+Peers who connect once a match is running land in `in-progress`. Pass `validateConfig` to guard the start config. `peerInfo` is `useRoom().peerInfo` (each peer's protocol version and [metadata](#room)); with `validateMetadata` (the second type parameter, `useLobby<Config, Meta>`; it may be passed inline, and is read when peer info changes), metadata that fails it reads as `null`. Lobby messages are accepted only from the host of the roster they carry, as seen from your own view of the room.
 
 ### `useHostedSimulation(key, options)`
 

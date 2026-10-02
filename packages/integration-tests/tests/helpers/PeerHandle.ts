@@ -90,6 +90,37 @@ export class PeerHandle {
   }
 
   // ---------------------------------------------------------------------------
+  // Metadata
+  // ---------------------------------------------------------------------------
+
+  /** Each peer's protocol version and metadata, as this peer sees them. */
+  peerInfo(): Promise<Record<string, { protocol: number; metadata: JSONSerializable }>> {
+    return this.page.evaluate(() => window.__phop.peerInfo);
+  }
+
+  /** Replace this peer's `<Room metadata>`. */
+  setMetadata(metadata: Record<string, JSONSerializable> | undefined): Promise<void> {
+    return this.page.evaluate(
+      (m: Record<string, JSONSerializable> | undefined) => window.__setMetadata(m),
+      metadata
+    );
+  }
+
+  /** Waits until this peer sees `peerId`'s metadata equal `expected` (compared as JSON). */
+  async waitForMetadata(
+    peerId: string,
+    expected: JSONSerializable,
+    options?: { timeout?: number }
+  ): Promise<void> {
+    await this.page.waitForFunction(
+      ([id, text]: [string, string]) =>
+        JSON.stringify(window.__phop.peerInfo[id]?.metadata ?? null) === text,
+      [peerId, JSON.stringify(expected)] as [string, string],
+      { timeout: options?.timeout ?? DEFAULT_TIMEOUT }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Shared state
   // ---------------------------------------------------------------------------
 

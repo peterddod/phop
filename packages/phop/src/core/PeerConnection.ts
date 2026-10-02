@@ -1,6 +1,12 @@
 import type { SendOptions } from '../types';
 import type { PeerLink, PeerLinkOptions, SignalingSession } from './transport';
-import { DEFAULT_MAX_BUFFERED_AMOUNT, maxMessageSizeOf, WireLink } from './wire';
+import {
+  DEFAULT_MAX_BUFFERED_AMOUNT,
+  maxMessageSizeOf,
+  type PeerInfo,
+  type PeerMetadata,
+  WireLink,
+} from './wire';
 
 export type SignalData =
   | { type: 'offer'; sdp: RTCSessionDescriptionInit }
@@ -23,6 +29,8 @@ class PeerConnection implements PeerLink {
   private onChannelOpen?: (remotePeerId: string) => void;
   private onChannelClose?: (remotePeerId: string) => void;
   private onIncompatible?: (remotePeerId: string, protocol: number) => void;
+  private onPeerInfo?: (remotePeerId: string, info: PeerInfo) => void;
+  private metadata: PeerMetadata | null;
 
   constructor(opts: PeerConnectionOptions) {
     this.selfPeerId = opts.localPeerId;
@@ -32,6 +40,8 @@ class PeerConnection implements PeerLink {
     this.onChannelOpen = opts.onChannelOpen;
     this.onChannelClose = opts.onChannelClose;
     this.onIncompatible = opts.onIncompatible;
+    this.onPeerInfo = opts.onPeerInfo;
+    this.metadata = opts.metadata ?? null;
     this.maxBufferedAmount = opts.maxBufferedAmount ?? DEFAULT_MAX_BUFFERED_AMOUNT;
 
     this.pc = new RTCPeerConnection(
@@ -123,6 +133,8 @@ class PeerConnection implements PeerLink {
       onMessage: (message) => this.onChannelMessage?.(this.remotePeerId, message),
       onReady: () => this.onChannelOpen?.(this.remotePeerId),
       onIncompatible: (protocol) => this.onIncompatible?.(this.remotePeerId, protocol),
+      onPeerInfo: (info) => this.onPeerInfo?.(this.remotePeerId, info),
+      metadata: this.metadata,
     });
     this.wire = wire;
 
@@ -150,6 +162,13 @@ class PeerConnection implements PeerLink {
     if (this.dataChannel?.readyState === 'open') {
       this.wire?.send(text, options);
     }
+  }
+
+  setMetadata(metadata: PeerMetadata | null) {
+    this.metadata = metadata;
+    const state = this.dataChannel?.readyState;
+    // Before the channel opens this only stores it, for the hello.
+    if (state === 'connecting' || state === 'open') this.wire?.setMetadata(metadata);
   }
 
   close() {

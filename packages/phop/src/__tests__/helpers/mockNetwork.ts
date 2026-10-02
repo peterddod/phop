@@ -119,5 +119,6 @@ export function toContextValue(room: MockRoom): RoomContextValue {
     onPeerConnected: room.onPeerConnected as RoomContextValue['onPeerConnected'],
     onPeerDisconnected: () => () => {},
     incompatiblePeers: [],
+    peerInfo: {},
   };
 }

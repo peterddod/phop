@@ -1,24 +1,27 @@
 import { useContext, useMemo } from 'react';
 import { RoomContext, type RoomContextValue } from '../context';
+import type { PeerInfo } from '../core/wire';
 
 /** What `useRoom` returns: the room context with every optional field filled in. */
 export type RoomApi = RoomContextValue &
   Required<
     Pick<
       RoomContextValue,
-      'remotePeers' | 'connectedPeers' | 'onPeerDisconnected' | 'incompatiblePeers'
+      'remotePeers' | 'connectedPeers' | 'onPeerDisconnected' | 'incompatiblePeers' | 'peerInfo'
     >
   >;
 
 const noopSubscribe = () => () => {};
 const NO_PEERS: string[] = [];
+const NO_INFO: Record<string, PeerInfo> = {};
 
 export function useRoom(): RoomApi {
   const context = useContext(RoomContext);
   const room = useMemo((): RoomApi | null => {
     if (!context) return null;
-    const { remotePeers, connectedPeers, onPeerDisconnected, incompatiblePeers } = context;
-    if (remotePeers && connectedPeers && onPeerDisconnected && incompatiblePeers) {
+    const { remotePeers, connectedPeers, onPeerDisconnected, incompatiblePeers, peerInfo } =
+      context;
+    if (remotePeers && connectedPeers && onPeerDisconnected && incompatiblePeers && peerInfo) {
       return context as RoomApi;
     }
     // A custom provider written against the 1.x shape.
@@ -29,6 +32,7 @@ export function useRoom(): RoomApi {
       connectedPeers: connectedPeers ?? remote,
       onPeerDisconnected: onPeerDisconnected ?? noopSubscribe,
       incompatiblePeers: incompatiblePeers ?? NO_PEERS,
+      peerInfo: peerInfo ?? NO_INFO,
     };
   }, [context]);
   if (!room) {

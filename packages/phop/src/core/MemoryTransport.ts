@@ -10,6 +10,7 @@ import type {
 import {
   type DataChannelLike,
   DEFAULT_MAX_BUFFERED_AMOUNT,
+  type PeerMetadata,
   PROTOCOL_VERSION,
   utf8Length,
   WireLink,
@@ -164,6 +165,8 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
         onMessage: (message) => options.onChannelMessage?.(remotePeerId, message),
         onReady: () => options.onChannelOpen?.(remotePeerId),
         onIncompatible: (protocol) => options.onIncompatible?.(remotePeerId, protocol),
+        onPeerInfo: (info) => options.onPeerInfo?.(remotePeerId, info),
+        metadata: options.metadata,
         protocol: protocolOf(joinIndex.get(options.localPeerId) ?? 0),
       });
     }
@@ -182,6 +185,11 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
 
     send(text: string, options?: SendOptions): void {
       if (this.open) this.wire.send(text, options);
+    }
+
+    setMetadata(metadata: PeerMetadata | null): void {
+      // Before opening it only stores it, for the hello.
+      if (!this.closed) this.wire.setMetadata(metadata);
     }
 
     close(): void {
