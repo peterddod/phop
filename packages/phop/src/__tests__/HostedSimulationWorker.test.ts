@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HostedSimulation, type HostedSimulationOptions } from '../core/HostedSimulation';
 import {
   createHostedSimulationWorker,
+  type FromWorker,
   type HostedSimulationWorkerOptions,
   type SimulationWorker,
   type SimulationWorkerScope,
+  type ToWorker,
+  type WorkerConfig,
 } from '../core/simulation-worker';
 import { createMockNetwork, type MockRoom } from './helpers/mockNetwork';
 
@@ -370,5 +373,149 @@ describe('HostedSimulation in a worker', () => {
     expect(hash(client.getState())).toBe(hash(host.getState()));
     host.stop();
     client.stop();
+  });
+
+  it("keeps the host's own inputs from a cut-off once it reconnects", async () => {
+    const { net, sims, sync } = setup(['a', 'b', 'c']);
+    await advanceUntil(() => sims.a.getTick() >= 5);
+    net.setMembers(['a'], ['a']);
+    sync();
+    await vi.advanceTimersByTimeAsync(200);
+    sims.a.dispatch('held');
+    await vi.advanceTimersByTimeAsync(500);
+    net.setMembers(['a', 'b', 'c']);
+    sync();
+    await advanceUntil(() => sims.c.getState().log.some((l) => l.endsWith(':a:held')));
+  });
+
+  /** A host whose worker fails right after `trigger` is posted to it, before taking it. */
+  function failOnInput(
+    trigger: string,
+    overrides: Partial<HostedSimulationOptions<ToyState, string>>
+  ) {
+    const players = Object.keys(overrides).length > 0 ? ['a', 'b', 'c'] : ['a', 'b'];
+    return setup(players, {
+      ...overrides,
+      worker: () => {
+        const w = fakeWorker();
+        const post = w.postMessage;
+        w.postMessage = (message) => {
+          post(message);
+          const m = message as ToWorker<ToyState, string>;
+          if (m.type === 'input' && m.input.input === trigger) w.fail();
+        };
+        return w;
+      },
+    });
+  }
+
+  it('steps inputs the failed worker never took on the main thread', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { sims } = failOnInput('mine', {});
+    await advanceUntil(() => sims.b.getTick() >= 10);
+    sims.b.dispatch('theirs');
+    sims.a.dispatch('mine');
+    await advanceUntil(() => sims.b.getState().log.some((l) => l.endsWith(':a:mine')));
+    const log = sims.b.getState().log;
+    expect(log.filter((l) => l.endsWith(':b:theirs'))).toHaveLength(1);
+    expect(log.filter((l) => l.endsWith(':a:mine'))).toHaveLength(1);
+    error.mockRestore();
+  });
+
+  it('still resigns an absent player whose resignation the failed worker never took', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { net, sims, sync } = failOnInput('resign', {
+      absence: { timeoutMs: 300, toInput: () => 'resign' },
+    });
+    await advanceUntil(() => sims.c.getTick() >= 10);
+    sims.b.stop();
+    net.setMembers(['a', 'c']);
+    sync();
+    await advanceUntil(() => sims.c.getState().log.some((l) => l.endsWith(':b:resign')));
+    error.mockRestore();
+  });
+
+  it("posts the host's state before its snapshot message, transferring the compressed bytes", async () => {
+    const posts: { message: FromWorker; transfer?: Transferable[] }[] = [];
+    let listener: ((event: MessageEvent) => void) | null = null;
+    const scope: SimulationWorkerScope = {
+      postMessage: (message, transfer) => posts.push({ message: message as FromWorker, transfer }),
+      addEventListener: (_type, l) => {
+        listener = l;
+      },
+      removeEventListener: () => {},
+    };
+    const dispose = createHostedSimulationWorker(workerOptions, scope);
+    const send = (data: ToWorker<ToyState, string>) => listener?.({ data } as MessageEvent);
+    const config: WorkerConfig = {
+      dt: 0.1,
+      loopIntervalMs: 50,
+      maxFrameDelta: 0.25,
+      maxCatchUp: 1,
+      keyframeInterval: 1,
+      broadcast: true,
+      hostId: 'a',
+      channel: 'sim:snapshot',
+    };
+    // Long enough to be compressed.
+    const state = { ...init(), log: Array.from({ length: 200 }, (_, i) => `entry ${i}`) };
+    send({ type: 'start', term: 1, state, tick: 0, seq: 0, config });
+    send({ type: 'run', run: true });
+    vi.advanceTimersByTime(200);
+    expect(posts.map((p) => p.message.type)).toEqual(['frame']);
+    // Compression takes real time: the message follows.
+    await vi.waitFor(() => expect(posts.some((p) => p.message.type === 'message')).toBe(true));
+    const post = posts.find((p) => p.message.type === 'message');
+    const message = post?.message;
+    if (message?.type !== 'message' || !message.deflated) throw new Error('not compressed');
+    expect(message.seq).toBe(posts[0].message.seq);
+    expect(post?.transfer).toEqual([message.deflated.buffer]);
+    dispose();
+  });
+
+  it('broadcasts each snapshot message with its own frame, even once a later one applied', () => {
+    const net = createMockNetwork();
+    const a = net.join('a');
+    net.join('b');
+    net.setMembers(['a', 'b']);
+    const sent: { text: string; full?: string }[] = [];
+    a.broadcastText = (text, options) => sent.push({ text, full: options?.supersede?.() });
+    const posted: ToWorker<ToyState, string>[] = [];
+    let toMain: ((event: MessageEvent) => void) | null = null;
+    const worker: SimulationWorker = {
+      postMessage: (message) => posted.push(message as ToWorker<ToyState, string>),
+      addEventListener: (type: 'message' | 'error', l: (event: MessageEvent) => void) => {
+        if (type === 'message') toMain = l;
+      },
+      terminate: () => {},
+    } as SimulationWorker;
+    const sim = new HostedSimulation(
+      'sim',
+      { players: ['a', 'b'], init, step, validateInput: isString, worker: () => worker },
+      a
+    );
+    sim.start();
+    const start = posted.find((m) => m.type === 'start');
+    if (start?.type !== 'start') throw new Error('not started');
+    const send = (data: FromWorker) => toMain?.({ data } as MessageEvent);
+    const at = (count: number) => JSON.stringify({ ...init(), count });
+    const term = start.term;
+    send({ type: 'frame', term, tick: 1, seq: 1, inputs: 0, stateText: at(1) });
+    send({ type: 'frame', term, tick: 2, seq: 2, inputs: 0, stateText: at(2) });
+    expect(sim.getState().count).toBe(2);
+    send({ type: 'message', term, seq: 1, message: 'one', delta: true });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toBe('one');
+    expect(JSON.parse(sent[0].full ?? '').data.d).toMatchObject({
+      tick: 1,
+      seq: 1,
+      state: { count: 1 },
+    });
+    // Superseded: never sent.
+    send({ type: 'message', term, seq: 1, message: 'again' });
+    expect(sent).toHaveLength(1);
+    send({ type: 'message', term, seq: 2, message: 'two' });
+    expect(sent.map((s) => s.text)).toEqual(['one', 'two']);
+    sim.stop();
   });
 });

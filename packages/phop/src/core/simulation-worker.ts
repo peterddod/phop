@@ -11,14 +11,17 @@ import { COMPRESS_MIN_LENGTH, canDeflate, deflateText } from './wire';
  * handover), forwards every input, and tells it when to run or hold (the
  * migration grace, a cut-off). The worker steps on its own timer (dedicated
  * worker timers keep running in hidden tabs) and, after each stepping frame,
- * posts a frame: the changes since its previous frame, for the main thread
- * to apply to its copy of the state the way a receiver applies a delta, and
- * the snapshot message for peers, serialised and compressed. On demotion the
- * main thread stops the worker and hands over its copy of the state.
+ * posts a frame at once: the changes since its previous frame, for the main
+ * thread to apply to its copy of the state the way a receiver applies a
+ * delta. The snapshot message for peers follows once it is serialised and
+ * compressed. On demotion the main thread stops the worker and hands over
+ * its copy of the state.
  *
  * Frames carry the term they were started in; the main thread ignores those
  * of an earlier term, so a frame still in flight when the worker is stopped
- * or restarted was never published to anyone.
+ * or restarted was never published to anyone. Frames also count the inputs
+ * the worker has taken, so the main thread knows which of those it sent
+ * would be lost with the worker.
  */
 
 /** The worker side's tuning, from the main thread's options. */
@@ -44,7 +47,7 @@ export type ToWorker<TState, TInput> =
   /** Step (true) or hold (false). Held after `start`. */
   | { type: 'run'; run: boolean }
   | { type: 'input'; input: PlayerInput<TInput> }
-  /** Give up authority and drop queued inputs. */
+  /** Give up authority, drop queued inputs and reset the count of inputs taken. */
   | { type: 'stop' };
 
 /** Worker to main thread, after each stepping frame. */
@@ -53,20 +56,35 @@ export interface WorkerFrame {
   term: number;
   tick: number;
   seq: number;
+  /** Inputs taken since the last `stop`, all terms counted. */
+  inputs: number;
   /** The state as JSON text, on the first frame of a term. */
   stateText?: string;
   /** Otherwise, the changes since the term's previous frame. */
   patch?: JsonPatch;
-  /** The snapshot message for peers, from `channelMessageText`. */
-  message?: string;
+}
+
+/** Worker to main thread, after the frame `seq` when broadcasting: its snapshot for peers. */
+export interface WorkerMessage {
+  type: 'message';
+  term: number;
+  seq: number;
+  /** The snapshot message, from `channelMessageText`. */
+  message: string;
   /** `message` is a delta (whose base is the previous frame's snapshot). */
   delta?: boolean;
   /** `message` as deflate-raw bytes, when it is long enough to be compressed. */
   deflated?: Uint8Array<ArrayBuffer>;
 }
 
-export function isWorkerFrame(data: unknown): data is WorkerFrame {
-  return typeof data === 'object' && data !== null && (data as WorkerFrame).type === 'frame';
+export type FromWorker = WorkerFrame | WorkerMessage;
+
+export function isFromWorker(data: unknown): data is FromWorker {
+  if (typeof data !== 'object' || data === null) return false;
+  const d = data as { [K in keyof WorkerFrame | keyof WorkerMessage]?: unknown };
+  if (typeof d.term !== 'number' || typeof d.seq !== 'number') return false;
+  if (d.type === 'frame') return typeof d.tick === 'number' && Number.isFinite(d.inputs);
+  return d.type === 'message' && typeof d.message === 'string';
 }
 
 /**
@@ -82,7 +100,7 @@ export interface SimulationWorker {
 
 /** The worker's global scope as `createHostedSimulationWorker` uses it. */
 export interface SimulationWorkerScope {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
   addEventListener(type: 'message', listener: (event: MessageEvent) => void): void;
   removeEventListener(type: 'message', listener: (event: MessageEvent) => void): void;
 }
@@ -114,7 +132,13 @@ export function createHostedSimulationWorker<TState, TInput>(
   options: HostedSimulationWorkerOptions<TState, TInput>,
   scope: SimulationWorkerScope = globalThis as unknown as SimulationWorkerScope
 ): () => void {
-  const sim = new WorkerSimulation(options, (frame) => scope.postMessage(frame));
+  const sim = new WorkerSimulation(options, (frame) =>
+    // The compressed bytes are only read by the main thread: move them, don't copy.
+    scope.postMessage(
+      frame,
+      frame.type === 'message' && frame.deflated ? [frame.deflated.buffer] : []
+    )
+  );
   const onMessage = (event: MessageEvent) => sim.handle(event.data as ToWorker<TState, TInput>);
   scope.addEventListener('message', onMessage);
   return () => {
@@ -131,6 +155,7 @@ class WorkerSimulation<TState, TInput> {
   private tick = 0;
   private seq = 0;
   private queue: PlayerInput<TInput>[] = [];
+  private consumed = 0;
   private running = false;
   private accumulator = 0;
   private lastTime: number | null = null;
@@ -138,12 +163,12 @@ class WorkerSimulation<TState, TInput> {
   private sent: { seq: number; state: JsonValue } | null = null;
   private keyframeTick = 0;
   private timer: { id: ReturnType<typeof setInterval>; intervalMs: number } | null = null;
-  // Frames go out in order, each after the compression of the ones before.
+  // Snapshot messages go out in order, each after the compression of the ones before.
   private posting: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly options: HostedSimulationWorkerOptions<TState, TInput>,
-    private readonly post: (frame: WorkerFrame) => void
+    private readonly post: (frame: FromWorker) => void
   ) {}
 
   handle(message: ToWorker<TState, TInput>): void {
@@ -171,6 +196,7 @@ class WorkerSimulation<TState, TInput> {
       case 'stop':
         this.state = null;
         this.queue = [];
+        this.consumed = 0;
         this.running = false;
         this.sent = null;
         if (this.timer) clearInterval(this.timer.id);
@@ -216,6 +242,7 @@ class WorkerSimulation<TState, TInput> {
       while (this.accumulator >= dt) {
         // Inputs land on the first sub-step only.
         const inputs = stepped ? [] : this.queue.splice(0);
+        this.consumed += inputs.length;
         const next = this.options.step(state, inputs, dt);
         if (next !== undefined) {
           state = next;
@@ -242,39 +269,46 @@ class WorkerSimulation<TState, TInput> {
     const patch = prev === null ? null : diffJson(prev.state, state, getId);
     this.sent = { seq, state };
 
-    const frame: WorkerFrame = { type: 'frame', term: this.term, tick, seq };
+    const frame: WorkerFrame = { type: 'frame', term: this.term, tick, seq, inputs: this.consumed };
     if (patch === null) frame.stateText = text;
     else frame.patch = patch;
+    // The host's own state doesn't wait for compression.
+    this.post(frame);
+    if (!config.broadcast) return;
 
-    if (config.broadcast) {
-      const { hostId, keyframeInterval } = config;
-      let data: string;
-      // A term starts with a keyframe: what peers hold is no base for it.
-      if (
-        prev === null ||
-        patch === null ||
-        keyframeInterval <= 0 ||
-        tick - this.keyframeTick >= Math.max(1, Math.round(keyframeInterval / config.dt))
-      ) {
-        this.keyframeTick = tick;
-        data = `{"hostId":${JSON.stringify(hostId)},"tick":${tick},"seq":${seq},"state":${text}}`;
-      } else {
-        data = JSON.stringify({ hostId, tick, seq, base: prev.seq, patch });
-        frame.delta = true;
-      }
-      frame.message = channelMessageText(hostId, config.channel, data);
+    const { hostId, keyframeInterval } = config;
+    let data: string;
+    let delta = false;
+    // A term starts with a keyframe: what peers hold is no base for it.
+    if (
+      prev === null ||
+      patch === null ||
+      keyframeInterval <= 0 ||
+      tick - this.keyframeTick >= Math.max(1, Math.round(keyframeInterval / config.dt))
+    ) {
+      this.keyframeTick = tick;
+      data = `{"hostId":${JSON.stringify(hostId)},"tick":${tick},"seq":${seq},"state":${text}}`;
+    } else {
+      data = JSON.stringify({ hostId, tick, seq, base: prev.seq, patch });
+      delta = true;
     }
+    const message: WorkerMessage = {
+      type: 'message',
+      term: this.term,
+      seq,
+      message: channelMessageText(hostId, config.channel, data),
+    };
+    if (delta) message.delta = true;
 
-    const message = frame.message;
     this.posting = this.posting.then(async () => {
-      if (message !== undefined && message.length >= COMPRESS_MIN_LENGTH && canDeflate()) {
+      if (message.message.length >= COMPRESS_MIN_LENGTH && canDeflate()) {
         try {
-          frame.deflated = await deflateText(message);
+          message.deflated = await deflateText(message.message);
         } catch {
           // The main thread compresses it instead.
         }
       }
-      this.post(frame);
+      this.post(message);
     });
   }
 }
