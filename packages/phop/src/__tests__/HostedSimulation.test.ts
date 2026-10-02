@@ -109,11 +109,20 @@ describe('HostedSimulation', () => {
     const tick = sims.b.getTick();
     const forged = { count: 999, log: ['forged'] };
     // c claims to be the host a.
-    net.inject('c', 'b', { ch: 'sim:snapshot', d: { hostId: 'a', tick: tick + 5, state: forged } });
+    net.inject('c', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'a', seq: 1, tick: tick + 5, state: forged },
+    });
     // c honestly names itself but isn't host.
-    net.inject('c', 'b', { ch: 'sim:snapshot', d: { hostId: 'c', tick: tick + 5, state: forged } });
+    net.inject('c', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'c', seq: 1, tick: tick + 5, state: forged },
+    });
     // Stale snapshot from the real host.
-    net.inject('a', 'b', { ch: 'sim:snapshot', d: { hostId: 'a', tick: 0, state: forged } });
+    net.inject('a', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'a', seq: 1, tick: 0, state: forged },
+    });
     expect(sims.b.getState().log).not.toContain('forged');
   });
 
@@ -122,7 +131,10 @@ describe('HostedSimulation', () => {
       validateState: (d): d is TestState =>
         typeof d === 'object' && d !== null && typeof (d as TestState).count === 'number',
     });
-    net.inject('a', 'b', { ch: 'sim:snapshot', d: { hostId: 'a', tick: 50, state: { bad: 1 } } });
+    net.inject('a', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'a', seq: 1, tick: 50, state: { bad: 1 } },
+    });
     expect(sims.b.getTick()).toBe(0);
   });
 
@@ -173,9 +185,12 @@ describe('HostedSimulation', () => {
     const evil = { count: -1, log: ['evil'] };
     net.inject('d', 'b', {
       ch: 'sim:snapshot',
-      d: { hostId: 'd', tick: Number.MAX_SAFE_INTEGER, state: evil },
+      d: { hostId: 'd', seq: 1, tick: Number.MAX_SAFE_INTEGER, state: evil },
     });
-    net.inject('c', 'b', { ch: 'sim:snapshot', d: { hostId: 'c', tick: before + 1, state: evil } });
+    net.inject('c', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'c', seq: 1, tick: before + 1, state: evil },
+    });
     expect(sims.b.getState().log).not.toContain('evil');
     expect(sims.b.getTick()).toBe(before);
 
@@ -197,7 +212,7 @@ describe('HostedSimulation', () => {
     const aTick = sims.a.getTick();
     net.inject('b', 'a', {
       ch: 'sim:snapshot',
-      d: { hostId: 'b', tick: aTick + 10_000, state: { count: 0, log: ['far'] } },
+      d: { hostId: 'b', seq: 1, tick: aTick + 10_000, state: { count: 0, log: ['far'] } },
     });
     expect(sims.a.getTick()).toBe(aTick);
   });
@@ -336,5 +351,171 @@ describe('HostedSimulation', () => {
     expect(sims.a.getVersion()).toBeGreaterThan(2);
     expect(error).toHaveBeenCalled();
     error.mockRestore();
+  });
+});
+
+describe('HostedSimulation snapshot deltas', () => {
+  type Sent = { hostId: string; tick: number; seq: number; base?: number; patch?: unknown[] };
+
+  /** Record a's snapshot broadcasts; `drop` swallows the next n of them. */
+  function tap(room: MockRoom) {
+    const sent: Sent[] = [];
+    const tapState = { drop: 0 };
+    const broadcast = room.broadcast;
+    room.broadcast = (message, sendOptions) => {
+      const data = message.data as { ch: string; d: Sent };
+      if (data.ch === 'sim:snapshot') {
+        sent.push(data.d);
+        if (tapState.drop > 0) {
+          tapState.drop--;
+          return;
+        }
+      }
+      broadcast(message, sendOptions);
+    };
+    return { sent, tapState };
+  }
+
+  it('sends a keyframe, then deltas, with a keyframe every keyframeInterval', () => {
+    const { rooms, sims } = setup(['a', 'b'], { keyframeInterval: 0.5 });
+    const { sent } = tap(rooms.a);
+    vi.advanceTimersByTime(2000);
+    expect(sent.length).toBeGreaterThan(10);
+    const keyframes = sent.filter((s) => s.base === undefined);
+    // The first snapshot is a keyframe, then one every 5 ticks.
+    expect(sent[0].base).toBeUndefined();
+    expect(keyframes.length).toBeGreaterThanOrEqual(3);
+    expect(keyframes.length).toBeLessThan(sent.length / 2);
+    for (let i = 1; i < sent.length; i++) {
+      expect(sent[i].seq).toBe(sent[i - 1].seq + 1);
+      if (sent[i].base !== undefined) expect(sent[i].base).toBe(sent[i - 1].seq);
+    }
+    // Byte for byte what the host has.
+    expect(JSON.stringify(sims.b.getState())).toBe(JSON.stringify(sims.a.getState()));
+  });
+
+  it('a delta holds only what changed', () => {
+    const { rooms, sims } = setup(['a', 'b']);
+    const { sent } = tap(rooms.a);
+    sims.b.dispatch('x');
+    vi.advanceTimersByTime(600);
+    const deltas = sent.filter((s) => s.base !== undefined);
+    expect(deltas.length).toBeGreaterThan(2);
+    expect(deltas[deltas.length - 1].patch).toEqual([[0, ['count'], sims.a.getState().count]]);
+    expect(sims.b.getState().log).toEqual(['b:x']);
+  });
+
+  it('sends full snapshots only with keyframeInterval 0', () => {
+    const { rooms, sims } = setup(['a', 'b'], { keyframeInterval: 0 });
+    const { sent } = tap(rooms.a);
+    vi.advanceTimersByTime(1000);
+    expect(sent.length).toBeGreaterThan(5);
+    expect(sent.every((s) => s.base === undefined)).toBe(true);
+    expect(sims.b.getState()).toEqual(sims.a.getState());
+  });
+
+  it('asks the host for a keyframe after missing a delta, then follows again', () => {
+    const { net, rooms, sims } = setup(['a', 'b'], { keyframeInterval: 60 });
+    const { tapState } = tap(rooms.a);
+    vi.advanceTimersByTime(500);
+    const resync = vi.fn();
+    rooms.a.onMessage(({ data }) => {
+      if ((data as { ch?: string }).ch === 'sim:resync') resync();
+    });
+    tapState.drop = 1;
+    vi.advanceTimersByTime(100);
+    const stuck = sims.b.getTick();
+    vi.advanceTimersByTime(100);
+    expect(resync).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(500);
+    expect(sims.b.getTick()).toBeGreaterThan(stuck);
+    expect(JSON.stringify(sims.b.getState())).toBe(JSON.stringify(sims.a.getState()));
+    // A delta against a base b doesn't hold changes nothing.
+    const tick = sims.b.getTick();
+    net.inject('a', 'b', {
+      ch: 'sim:snapshot',
+      d: { hostId: 'a', tick: tick + 1, seq: 10_000, base: 9_999, patch: [[0, ['count'], -5]] },
+    });
+    expect(sims.b.getTick()).toBe(tick);
+  });
+
+  it('rejects a delta whose result fails validateState, keeping the old state', () => {
+    const { net, rooms, sims } = setup(['a', 'b'], {
+      keyframeInterval: 60,
+      validateState: (d): d is TestState =>
+        typeof d === 'object' && d !== null && typeof (d as TestState).count === 'number',
+    });
+    const { sent } = tap(rooms.a);
+    vi.advanceTimersByTime(500);
+    const last = sent[sent.length - 1];
+    const before = JSON.stringify(sims.b.getState());
+    for (const patch of [[[0, ['count'], 'nope']], [[0, ['missing', 'x'], 1]]]) {
+      net.inject('a', 'b', {
+        ch: 'sim:snapshot',
+        d: { hostId: 'a', tick: last.tick + 1, seq: last.seq + 1, base: last.seq, patch },
+      });
+      expect(JSON.stringify(sims.b.getState())).toBe(before);
+    }
+  });
+
+  it('matches array elements by getId', () => {
+    interface ListState {
+      items: { key: number; n: number }[];
+    }
+    const net = createMockNetwork();
+    const rooms = { a: net.join('a'), b: net.join('b') };
+    net.setMembers(['a', 'b']);
+    const opts: HostedSimulationOptions<ListState, string> = {
+      players: ['a', 'b'],
+      init: () => ({ items: Array.from({ length: 20 }, (_, key) => ({ key, n: 0 })) }),
+      step: (state) => {
+        // Drop the first item; bump the last.
+        state.items.shift();
+        const last = state.items[state.items.length - 1];
+        if (last) last.n++;
+      },
+      validateInput: isString,
+      migrationGraceMs: 100,
+      getId: (item) => (item as { key: number }).key,
+    };
+    const { sent } = tap(rooms.a);
+    const a = new HostedSimulation('sim', opts, rooms.a);
+    const b = new HostedSimulation('sim', { ...opts, getId: undefined }, rooms.b);
+    a.start();
+    b.start();
+    vi.advanceTimersByTime(800);
+    const delta = sent.filter((s) => s.base !== undefined).pop();
+    expect(delta?.patch).toEqual([
+      [2, ['items'], 0, 1, []],
+      [0, ['items', a.getState().items.length - 1, 'n'], expect.any(Number)],
+    ]);
+    expect(JSON.stringify(b.getState())).toBe(JSON.stringify(a.getState()));
+  });
+
+  it('sends a keyframe to a peer whose channel opens mid-match', () => {
+    const { net, sims } = setup(['a', 'b'], { keyframeInterval: 60 }, { requireLinks: true });
+    net.openLink('a', 'b');
+    vi.advanceTimersByTime(500);
+    expect(sims.b.getTick()).toBe(sims.a.getTick());
+    net.closeLink('a', 'b');
+    vi.advanceTimersByTime(500);
+    expect(sims.b.getTick()).toBeLessThan(sims.a.getTick());
+    // Reopened: the keyframe lands at once, before any later delta.
+    net.openLink('a', 'b');
+    expect(sims.b.getTick()).toBe(sims.a.getTick());
+    expect(JSON.stringify(sims.b.getState())).toBe(JSON.stringify(sims.a.getState()));
+  });
+
+  it('starts a new host term with a keyframe', () => {
+    const { net, rooms, sims, sync } = setup(['a', 'b', 'c'], { keyframeInterval: 60 });
+    vi.advanceTimersByTime(500);
+    const { sent } = tap(rooms.b);
+    sims.a.stop();
+    net.setMembers(['b', 'c']);
+    sync();
+    vi.advanceTimersByTime(1000);
+    expect(sent[0].base).toBeUndefined();
+    expect(sent.slice(1).every((s) => s.base !== undefined)).toBe(true);
+    expect(JSON.stringify(sims.c.getState())).toBe(JSON.stringify(sims.b.getState()));
   });
 });

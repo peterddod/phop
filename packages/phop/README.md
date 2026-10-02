@@ -53,7 +53,9 @@ Establishes a WebRTC mesh with all peers in the given room.
 | `maxBufferedAmount` | `number?` | Bytes queued on a peer's data channel above which coalescable messages (such as `useHostedSimulation` snapshots) are held back, keeping only the newest. Default 256 KiB |
 | `transport` | `RoomTransport?` | How peers connect. Defaults to WebRTC with the signalling server; see [Testing without a network](#testing-without-a-network) |
 
-**Sending.** A broadcast is serialised once for all peers, and a peer whose send fails is logged and skipped without affecting the rest. Messages larger than the data channel's maximum message size (`RTCSctpTransport.maxMessageSize`, 256 KiB if unknown) are split into chunks and reassembled in order on arrival, so a large state never fails to send. A message sent with `{ coalesce: key }` (the optional last argument of `broadcast` and `sendToPeer`) is held while that peer's channel has more than `maxBufferedAmount` bytes queued; a newer message with the same key replaces it, and the newest is sent once the channel drains. Every peer in a room must run the same phop version.
+**Sending.** A broadcast is serialised once for all peers, and a peer whose send fails is logged and skipped without affecting the rest. Messages of 2 KB or more are compressed (deflate-raw via `CompressionStream`) and sent as binary frames, keeping their order with the messages around them. Messages larger than the data channel's maximum message size (`RTCSctpTransport.maxMessageSize`, 256 KiB if unknown) are split into chunks and reassembled in order on arrival, so a large state never fails to send. A message sent with `{ coalesce: key }` (the optional last argument of `broadcast` and `sendToPeer`) is held while that peer's channel has more than `maxBufferedAmount` bytes queued; a newer message with the same key replaces it, and the newest is sent once the channel drains.
+
+**Protocol version.** Each peer's first frame on a data channel names its wire protocol version (`PROTOCOL_VERSION`, exported). A peer on another version, including phop 1.x, is left out of `peers` and listed in `incompatiblePeers` instead, and nothing is exchanged with it. Messages to a peer are held until its hello arrives (the handshake is acknowledged, so a lost hello is recovered), and `connectedPeers`/`onPeerConnected` report a peer only after that. Every player in a room must run a phop release with the same protocol version; show `incompatiblePeers` to tell users who needs to update.
 
 ### `useSharedState(key, initialValue, strategy?)`
 
@@ -124,6 +126,7 @@ const {
   peers,          // signalling membership, deduplicated, including self
   remotePeers,    // peers without self
   connectedPeers, // remote peers with an open data channel
+  incompatiblePeers, // peers on another protocol version, left out of `peers`
   isConnected,    // signalling connection is up (see below)
   broadcast,
   sendToPeer,
@@ -196,9 +199,10 @@ const { getState, dispatch, tick, version, isHost, hostId } = useHostedSimulatio
 
 - **Host migration.** When the host leaves, the next player takes over after a short grace period (`migrationGraceMs`, default 1000). A demoted host hands its state to the new host, resending until the data channel is open, so a returning host never rolls the match back. The new host accepts that handover only from the peer that held authority in between, and only if its tick is plausible.
 - **Cut-off guard.** A host that sees every remaining rival vanish at once pauses instead of simulating alone, and resumes if they reappear. A host that loses the signalling server stops for good (see `useRoom`).
-- **Slow peers.** Snapshots are coalescable: a peer whose data channel is backed up skips stale snapshots and gets the newest once it drains, rather than falling further behind. A failing send never stops the host's own loop.
+- **Snapshot deltas.** A snapshot is a keyframe (the full state) every `keyframeInterval` seconds of sim time (default 1), when a host takes over, and for a peer whose channel opens; in between it is a delta holding only the fields that changed since the previous snapshot. A receiver applies a delta to the snapshot it was based on, checks the result with `validateState`, and asks the host for a keyframe if it is missing that base. Deltas need a plain JSON state (what survives a JSON round trip is what peers get), and an adopted state must not be mutated except by `step`. Arrays of objects with an `id` are matched by it, so removing one element doesn't resend the rest; pass `getId: (item, path) => …` to match by something else, or return `undefined` to match by position. `keyframeInterval: 0` sends full snapshots only.
+- **Slow peers.** Snapshots are coalescable: a peer whose data channel is backed up skips stale snapshots and gets the newest once it drains (and then a keyframe, since it missed that delta's base), rather than falling further behind. A failing send never stops the host's own loop.
 - **Hidden tabs.** The loop runs on a worker timer, so it keeps going when the host's tab is hidden.
-- **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta` and `maxCatchUp`.
+- **Tuning.** `dt` (default 0.1 s), `loopIntervalMs`, `maxFrameDelta`, `maxCatchUp` and `keyframeInterval`.
 
 `key`, `players` and `init` are read once per mount. Remount to start a new simulation. `HostedSimulation` is the same thing without React.
 
@@ -215,7 +219,7 @@ render(<Room signallingServerUrl="memory" roomId="test" transport={net.transport
 net.dropSignaling('peer-0001'); // the first peer loses its connection; the others see it leave
 ```
 
-Events are delivered as microtasks, so wait for them (e.g. with Testing Library's `waitFor`). `RoomTransport` is the interface to implement for other transports.
+`protocolOf: (joinIndex) => version` makes a peer announce another protocol version, to test a mixed-version room. Events are delivered as microtasks, so wait for them (e.g. with Testing Library's `waitFor`). `RoomTransport` is the interface to implement for other transports.
 
 ## Signaling Server
 

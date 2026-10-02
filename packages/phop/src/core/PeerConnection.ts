@@ -1,6 +1,6 @@
 import type { SendOptions } from '../types';
 import type { PeerLink, PeerLinkOptions, SignalingSession } from './transport';
-import { createInbox, DEFAULT_MAX_BUFFERED_AMOUNT, maxMessageSizeOf, Outbox } from './wire';
+import { DEFAULT_MAX_BUFFERED_AMOUNT, maxMessageSizeOf, WireLink } from './wire';
 
 export type SignalData =
   | { type: 'offer'; sdp: RTCSessionDescriptionInit }
@@ -14,7 +14,7 @@ class PeerConnection implements PeerLink {
 
   private pc: RTCPeerConnection;
   private dataChannel: RTCDataChannel | null = null;
-  private outbox: Outbox | null = null;
+  private wire: WireLink | null = null;
   private selfPeerId: string;
   private remotePeerId: string;
   private signalingClient: SignalingSession;
@@ -22,6 +22,7 @@ class PeerConnection implements PeerLink {
   private onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
   private onChannelOpen?: (remotePeerId: string) => void;
   private onChannelClose?: (remotePeerId: string) => void;
+  private onIncompatible?: (remotePeerId: string, protocol: number) => void;
 
   constructor(opts: PeerConnectionOptions) {
     this.selfPeerId = opts.localPeerId;
@@ -30,6 +31,7 @@ class PeerConnection implements PeerLink {
     this.onChannelMessage = opts.onChannelMessage;
     this.onChannelOpen = opts.onChannelOpen;
     this.onChannelClose = opts.onChannelClose;
+    this.onIncompatible = opts.onIncompatible;
     this.maxBufferedAmount = opts.maxBufferedAmount ?? DEFAULT_MAX_BUFFERED_AMOUNT;
 
     this.pc = new RTCPeerConnection(
@@ -113,14 +115,20 @@ class PeerConnection implements PeerLink {
   }
 
   private setupDataChannel(channel: RTCDataChannel) {
-    this.outbox = new Outbox(channel, this.maxBufferedAmount, () =>
-      maxMessageSizeOf(this.pc.sctp?.maxMessageSize)
-    );
-    const receive = createInbox((message) => this.onChannelMessage?.(this.remotePeerId, message));
+    channel.binaryType = 'arraybuffer';
+    const wire = new WireLink({
+      channel,
+      maxBufferedAmount: this.maxBufferedAmount,
+      maxMessageSize: () => maxMessageSizeOf(this.pc.sctp?.maxMessageSize),
+      onMessage: (message) => this.onChannelMessage?.(this.remotePeerId, message),
+      onReady: () => this.onChannelOpen?.(this.remotePeerId),
+      onIncompatible: (protocol) => this.onIncompatible?.(this.remotePeerId, protocol),
+    });
+    this.wire = wire;
 
     channel.onopen = () => {
       console.log(`Data channel open to ${this.remotePeerId}`);
-      this.onChannelOpen?.(this.remotePeerId);
+      wire.open();
     };
 
     channel.onclose = () => {
@@ -132,13 +140,15 @@ class PeerConnection implements PeerLink {
       console.error(`Data channel error with ${this.remotePeerId}:`, error);
     };
 
-    channel.onmessage = (event) => receive(event.data);
+    channel.onmessage = (event) => wire.receive(event.data);
+    // A channel announced by the remote side may already be open.
+    if (channel.readyState === 'open') wire.open();
   }
 
   /** Send a serialised message, split to fit the channel's maximum message size. */
   send(text: string, options?: SendOptions) {
     if (this.dataChannel?.readyState === 'open') {
-      this.outbox?.send(text, options);
+      this.wire?.send(text, options);
     }
   }
 

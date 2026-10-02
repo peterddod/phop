@@ -5,6 +5,7 @@ import { Room } from '../context/Room';
 import type { PlayerInput } from '../core/HostedSimulation';
 import { createMemoryNetwork } from '../core/MemoryTransport';
 import type { RoomTransport } from '../core/transport';
+import { PROTOCOL_VERSION } from '../core/wire';
 import { useHostedSimulation } from '../hooks/useHostedSimulation';
 import { type UseLobbyResult, useLobby } from '../hooks/useLobby';
 import { type RoomApi, useRoom } from '../hooks/useRoom';
@@ -93,6 +94,29 @@ describe('memory transport', () => {
     await waitFor(() => expect(c.received).toHaveLength(1));
     expect(b.received[0].data).toEqual({ counted: 'value' });
     expect(toJSON).toHaveBeenCalledTimes(1);
+  });
+
+  it('flags peers on another protocol version and leaves them out of the room', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const net = createMemoryNetwork({
+      protocolOf: (joinIndex) => (joinIndex === 3 ? PROTOCOL_VERSION + 1 : PROTOCOL_VERSION),
+    });
+    const [a, b, c] = joinRooms(net.transport, 3);
+    await waitFor(() => {
+      for (const p of [a, b]) {
+        expect(p.room?.incompatiblePeers).toEqual(['peer-0003']);
+        expect(p.room?.peers).toEqual(['peer-0001', 'peer-0002']);
+        expect(p.room?.connectedPeers).toHaveLength(1);
+      }
+      expect(c.room?.incompatiblePeers?.slice().sort()).toEqual(['peer-0001', 'peer-0002']);
+      expect(c.room?.peers).toEqual(['peer-0003']);
+    });
+    send(a.room, 'only b');
+    send(c.room, 'nobody');
+    await waitFor(() => expect(b.received).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(c.received).toHaveLength(0);
+    expect(a.received).toHaveLength(0);
   });
 
   it('keeps sending to the other peers when one peer fails', async () => {
@@ -252,5 +276,88 @@ describe('hosted simulation over the memory transport', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(a.room?.isConnected).toBe(false);
     expect(a.sim?.getState().tick).toBe(frozen);
+  });
+});
+
+// ---------------------------------------------------------------------
+// A large state: compressed keyframes and deltas reproduce the host's state
+// ---------------------------------------------------------------------
+
+interface World {
+  tick: number;
+  nextId: number;
+  units: Record<string, { id: string; pos: { q: number; r: number }; hp: number; path?: number[] }>;
+}
+
+function initWorld(): World {
+  const world: World = { tick: 0, nextId: 0, units: {} };
+  for (let i = 0; i < 300; i++) addUnit(world);
+  return world;
+}
+
+function addUnit(world: World) {
+  const id = `u${world.nextId++}`;
+  const n = world.nextId;
+  world.units[id] = { id, pos: { q: n % 17, r: n % 23 }, hp: 30, path: [n, n + 1, n + 2, n + 3] };
+}
+
+/** Mutates in place, like territile's sim: a few units move, one dies, one spawns. */
+function stepWorld(world: World) {
+  world.tick++;
+  const ids = Object.keys(world.units);
+  for (let i = world.tick % 7; i < ids.length; i += 7) {
+    const unit = world.units[ids[i]];
+    unit.pos.q++;
+    unit.path?.shift();
+    if (unit.path?.length === 0) delete unit.path;
+  }
+  if (world.tick % 3 === 0) delete world.units[ids[0]];
+  if (world.tick % 2 === 0) addUnit(world);
+}
+
+describe('snapshot deltas over the memory transport', () => {
+  it('a client holds exactly what the host held at that tick', async () => {
+    const history = new Map<number, string>();
+    const net = createMemoryNetwork({ maxMessageSize: 16 * 1024 });
+    const probes: { room: RoomApi | null; getState: (() => World) | null }[] = [];
+
+    function WorldMatch({ players, probe }: { players: string[]; probe: (typeof probes)[0] }) {
+      const sim = useHostedSimulation<World, number>('world', {
+        players,
+        init: initWorld,
+        step: (state) => {
+          stepWorld(state);
+          history.set(state.tick, JSON.stringify(state));
+        },
+        validateInput: isNumber,
+        dt: 0.02,
+        keyframeInterval: 0.2,
+        migrationGraceMs: 100,
+      });
+      probe.getState = sim.getState;
+      return null;
+    }
+    function WorldPlayer({ probe }: { probe: (typeof probes)[0] }) {
+      const lobby = useLobby();
+      probe.room = useRoom();
+      if (lobby.isLobbyHost && lobby.phase === 'lobby' && lobby.players.length === 2) {
+        queueMicrotask(() => lobby.start());
+      }
+      return lobby.match ? <WorldMatch players={lobby.match.players} probe={probe} /> : null;
+    }
+
+    for (let i = 0; i < 2; i++) {
+      const probe = { room: null, getState: null };
+      probes.push(probe);
+      render(
+        <Room signallingServerUrl="memory" roomId="world" transport={net.transport}>
+          <WorldPlayer probe={probe} />
+        </Room>
+      );
+    }
+    const [, b] = probes;
+    await waitFor(() => expect(b.getState?.().tick).toBeGreaterThan(40), { timeout: 4000 });
+    const state = (b.getState as () => World)();
+    expect(JSON.stringify(state)).toBe(history.get(state.tick));
   });
 });

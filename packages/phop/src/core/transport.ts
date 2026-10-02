@@ -32,8 +32,11 @@ export interface PeerLinkOptions {
   /** Buffered bytes above which coalescable messages are held back. */
   maxBufferedAmount?: number;
   onChannelMessage?: (peerId: string, message: Record<string, unknown>) => void;
+  /** The channel is open and the peer's hello says it speaks our protocol. */
   onChannelOpen?: (remotePeerId: string) => void;
   onChannelClose?: (remotePeerId: string) => void;
+  /** The peer speaks another protocol version; the link ignores it from then on. */
+  onIncompatible?: (remotePeerId: string, protocol: number) => void;
 }
 
 /** A data link to one remote peer. `PeerConnection` is the WebRTC implementation. */

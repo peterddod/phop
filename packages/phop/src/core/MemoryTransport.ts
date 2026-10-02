@@ -8,11 +8,11 @@ import type {
   SignalingSession,
 } from './transport';
 import {
-  createInbox,
   type DataChannelLike,
   DEFAULT_MAX_BUFFERED_AMOUNT,
-  Outbox,
+  PROTOCOL_VERSION,
   utf8Length,
+  WireLink,
 } from './wire';
 
 export interface MemoryNetworkOptions {
@@ -21,6 +21,11 @@ export interface MemoryNetworkOptions {
    * real data channel's. Default: unlimited. Messages above it are chunked.
    */
   maxMessageSize?: number;
+  /**
+   * Protocol version each peer announces, by join order (1-based), to test
+   * a mixed-version room. Default: this build's `PROTOCOL_VERSION`.
+   */
+  protocolOf?: (joinIndex: number) => number;
 }
 
 export interface MemoryNetwork {
@@ -45,6 +50,8 @@ export interface MemoryNetwork {
  */
 export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryNetwork {
   const maxMessageSize = options.maxMessageSize ?? Number.POSITIVE_INFINITY;
+  const protocolOf = options.protocolOf ?? (() => PROTOCOL_VERSION);
+  const joinIndex = new Map<string, number>();
   const rooms = new Map<string, Map<string, MemorySignaling>>();
   const links = new Map<string, MemoryLink>();
   const sessions = new Map<string, MemorySignaling>();
@@ -62,6 +69,7 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
         queueMicrotask(() => {
           joined++;
           this.peerId = `peer-${String(joined).padStart(4, '0')}`;
+          joinIndex.set(this.peerId, joined);
           const room = rooms.get(this.roomId) ?? new Map<string, MemorySignaling>();
           rooms.set(this.roomId, room);
           room.set(this.peerId, this);
@@ -118,10 +126,10 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
 
     constructor(private readonly link: MemoryLink) {}
 
-    send(data: string): void {
+    send(data: string | Uint8Array<ArrayBuffer>): void {
       const remote = this.link.remote;
       if (!this.link.open || !remote) throw new Error('memory link is not open');
-      const size = utf8Length(data);
+      const size = typeof data === 'string' ? utf8Length(data) : data.byteLength;
       if (size > maxMessageSize) {
         throw new TypeError(`message of ${size} bytes exceeds maxMessageSize ${maxMessageSize}`);
       }
@@ -144,24 +152,36 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
     open = false;
     closed = false;
     remote: MemoryLink | null = null;
-    private readonly outbox: Outbox;
-    readonly receive: (frame: unknown) => void;
+    private readonly wire: WireLink;
+    private readonly channel = new MemoryChannel(this);
 
     constructor(private readonly options: PeerLinkOptions) {
-      this.outbox = new Outbox(
-        new MemoryChannel(this),
-        options.maxBufferedAmount ?? DEFAULT_MAX_BUFFERED_AMOUNT,
-        () => maxMessageSize
-      );
-      this.receive = createInbox((message) =>
-        options.onChannelMessage?.(options.remotePeerId, message)
-      );
+      const { remotePeerId } = options;
+      this.wire = new WireLink({
+        channel: this.channel,
+        maxBufferedAmount: options.maxBufferedAmount ?? DEFAULT_MAX_BUFFERED_AMOUNT,
+        maxMessageSize: () => maxMessageSize,
+        onMessage: (message) => options.onChannelMessage?.(remotePeerId, message),
+        onReady: () => options.onChannelOpen?.(remotePeerId),
+        onIncompatible: (protocol) => options.onIncompatible?.(remotePeerId, protocol),
+        protocol: protocolOf(joinIndex.get(options.localPeerId) ?? 0),
+      });
+    }
+
+    receive(frame: unknown): void {
+      this.wire.receive(frame);
+    }
+
+    /** Announce our protocol. phop 1.x had no hello: its first frame was a message. */
+    hello(): void {
+      if (protocolOf(joinIndex.get(this.options.localPeerId) ?? 0) > 1) this.wire.open();
+      else this.channel.send(JSON.stringify({ data: null }));
     }
 
     handleSignal(): void {}
 
     send(text: string, options?: SendOptions): void {
-      if (this.open) this.outbox.send(text, options);
+      if (this.open) this.wire.send(text, options);
     }
 
     close(): void {
@@ -183,9 +203,10 @@ export function createMemoryNetwork(options: MemoryNetworkOptions = {}): MemoryN
       remote.remote = this;
       queueMicrotask(() => {
         for (const link of [this, remote]) {
-          if (link.closed) continue;
-          link.open = true;
-          link.options.onChannelOpen?.(link.options.remotePeerId);
+          if (!link.closed) link.open = true;
+        }
+        for (const link of [this, remote]) {
+          if (link.open) link.hello();
         }
       });
     }

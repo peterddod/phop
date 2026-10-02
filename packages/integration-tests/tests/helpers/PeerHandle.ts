@@ -28,9 +28,15 @@ export class PeerHandle {
   readonly page: Page;
   private readonly context: BrowserContext;
 
+  /** The page's console output, for failure messages. */
+  private readonly logs: string[] = [];
+
   constructor(page: Page, context: BrowserContext) {
     this.page = page;
     this.context = context;
+    page.on('console', (message) => {
+      this.logs.push(`${message.type()}: ${message.text()}`);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -64,11 +70,23 @@ export class PeerHandle {
    * asynchronously via WebRTC negotiation.
    */
   async waitForConnections(count: number, options?: { timeout?: number }): Promise<void> {
-    await this.page.waitForFunction(
-      (expected: number) => window.__phop.connectedPeerCount >= expected,
-      count,
-      { timeout: options?.timeout ?? DEFAULT_TIMEOUT }
-    );
+    try {
+      await this.page.waitForFunction(
+        (expected: number) => window.__phop.connectedPeerCount >= expected,
+        count,
+        { timeout: options?.timeout ?? DEFAULT_TIMEOUT }
+      );
+    } catch (error) {
+      // Say how far the mesh got, to tell a slow handshake from a lost one.
+      const state = await this.page.evaluate(() => ({
+        peerId: window.__phop.peerId,
+        peers: window.__phop.peers,
+        connectedPeers: window.__phop.connectedPeers,
+        connectedPeerCount: window.__phop.connectedPeerCount,
+      }));
+      const logs = this.logs.slice(-20).join('\n');
+      throw new Error(`${(error as Error).message}\nmesh: ${JSON.stringify(state)}\n${logs}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
