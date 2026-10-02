@@ -212,19 +212,17 @@ function linkPair(maxMessageSize = 1_000_000, foreignHello?: string) {
   return { links, received, frames, events };
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-
 describe('wire link', () => {
   it('exchanges hellos, then compresses large messages and keeps their order', async () => {
     const { links, received, frames, events } = linkPair();
-    await settle();
+    await vi.waitFor(() => expect(events).toHaveLength(2));
     expect(events.sort()).toEqual(['a:ready', 'b:ready']);
     const big = { big: 'abc'.repeat(5000) };
     links.a.send(JSON.stringify(big));
     links.a.send('{"small":1}');
     links.a.send(JSON.stringify({ big2: 'xyz'.repeat(5000) }));
     links.a.send('{"small":2}');
-    await settle();
+    await vi.waitFor(() => expect(received.b).toHaveLength(4));
     expect(received.b).toEqual([big, { small: 1 }, { big2: 'xyz'.repeat(5000) }, { small: 2 }]);
     const binary = frames.b.filter((f) => typeof f !== 'string') as Uint8Array[];
     expect(binary).toHaveLength(2);
@@ -234,13 +232,13 @@ describe('wire link', () => {
   });
 
   it('chunks compressed messages larger than the maximum message size', async () => {
-    const { links, received, frames } = linkPair(4096);
-    await settle();
+    const { links, received, frames, events } = linkPair(4096);
+    await vi.waitFor(() => expect(events).toHaveLength(2));
     const text = noise(50_000);
     links.a.send(JSON.stringify({ text }));
-    links.a.send('"after"');
-    await settle();
-    expect(received.b).toEqual([{ text }]);
+    links.a.send('{"after":1}');
+    await vi.waitFor(() => expect(received.b).toHaveLength(2));
+    expect(received.b).toEqual([{ text }, { after: 1 }]);
     const binary = frames.b.filter((f) => typeof f !== 'string') as Uint8Array[];
     expect(binary.length).toBeGreaterThan(5);
     for (const frame of binary) expect(frame.byteLength).toBeLessThanOrEqual(4096);
@@ -249,8 +247,7 @@ describe('wire link', () => {
   it('flags a peer on another protocol and ignores it', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { links, received, events } = linkPair(1_000_000, JSON.stringify({ phop: 99 }));
-    await settle();
-    expect(events).toContain('a:incompatible:99');
+    await vi.waitFor(() => expect(events).toContain('a:incompatible:99'));
     links.a.receive('{"data":"ignored"}');
     expect(received.a).toEqual([]);
     vi.restoreAllMocks();
@@ -259,8 +256,7 @@ describe('wire link', () => {
   it('treats a peer whose first frame is not a hello as phop 1.x', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { events } = linkPair(1_000_000, '{"senderId":"x","data":1,"timestamp":0}');
-    await settle();
-    expect(events).toContain('a:incompatible:1');
+    await vi.waitFor(() => expect(events).toContain('a:incompatible:1'));
     warn.mockRestore();
   });
 
@@ -271,7 +267,7 @@ describe('wire link', () => {
     const [frame] = encodeBinaryFrames(await deflateText('{"ok":1}'), 1000);
     receive(frame);
     receive('{"plain":2}');
-    await settle();
+    await vi.waitFor(() => expect(received).toHaveLength(2));
     expect(received).toEqual([{ ok: 1 }, { plain: 2 }]);
   });
 
