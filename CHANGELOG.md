@@ -1,3 +1,15 @@
+# [1.10.0](https://github.com/peterddod/phop/compare/v1.9.0...v1.10.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **phop:** keep worker inputs across reconnect and failure; post state before compression ([571f30e](https://github.com/peterddod/phop/commit/571f30e609432f1347147c38035024de8769e661))
+
+
+### Features
+
+* **phop:** step the hosted simulation in a Web Worker ([c414081](https://github.com/peterddod/phop/commit/c41408165e0887d7537a42d86d97062585873df6))
+
 # [1.9.0](https://github.com/peterddod/phop/compare/v1.8.1...v1.9.0) (2026-10-02)
 
 
