@@ -294,10 +294,12 @@ describe('HostedSimulation in a worker', () => {
     expect(bTick).toBeGreaterThan(sims.a.getTick());
 
     // a returns and is re-elected; b's handover (its copy of the worker's
-    // state) is adopted and a's worker carries on from it.
+    // state, sent once the worker confirms its stop) is adopted and a's
+    // worker carries on from it.
     net.setMembers(['a', 'b', 'c']);
     sync();
     expect(sims.a.getHostId()).toBe('a');
+    await vi.advanceTimersByTimeAsync(0);
     expect(sims.a.getTick()).toBe(bTick);
     const handedOver = hash(sims.b.getState());
     expect(hash(sims.a.getState())).toBe(handedOver);
@@ -309,6 +311,95 @@ describe('HostedSimulation in a worker', () => {
     const replay = init();
     for (let i = 0; i < sims.a.getTick(); i++) step(replay, []);
     expect(hash(sims.a.getState())).toBe(hash(replay));
+  });
+
+  /** A worker whose messages to the main thread can be held back, as if still in flight. */
+  function gatedWorker() {
+    const worker = fakeWorker();
+    const held: { listener: (event: MessageEvent) => void; event: MessageEvent }[] = [];
+    const gate = { hold: false, held, release: () => {} };
+    gate.release = () => {
+      gate.hold = false;
+      for (const { listener, event } of held.splice(0)) listener(event);
+    };
+    const add = worker.addEventListener.bind(worker) as (
+      type: string,
+      listener: (event: MessageEvent) => void
+    ) => void;
+    worker.addEventListener = ((type: string, listener: (event: MessageEvent) => void) => {
+      if (type !== 'message') return add(type, listener);
+      add(type, (event) => {
+        if (gate.hold) held.push({ listener, event });
+        else listener(event);
+      });
+    }) as SimulationWorker['addEventListener'];
+    return { worker, gate };
+  }
+
+  /**
+   * b hosts while a is away; b dispatches a command and is demoted as a
+   * returns. On the main thread (`main`), b has stepped it; with `queued`,
+   * not yet. In worker mode, b's worker has stepped it in a frame still on
+   * its way to b's main thread (delivered after the demotion, or, with
+   * `lost`, never).
+   */
+  async function demoteWithCommandInFlight(mode: 'main' | 'queued' | 'worker' | 'lost') {
+    const gates: ReturnType<typeof gatedWorker>['gate'][] = [];
+    const { net, sims, sync } = setup(['a', 'b', 'c'], {
+      worker:
+        mode === 'main' || mode === 'queued'
+          ? false
+          : () => {
+              const { worker, gate } = gatedWorker();
+              gates.push(gate);
+              return worker;
+            },
+    });
+    await advanceUntil(() => sims.c.getTick() >= 5);
+    net.setMembers(['b', 'c'], ['b', 'c']);
+    net.setMembers(['a'], ['a']);
+    sync();
+    await advanceUntil(() => sims.c.getTick() >= 20);
+
+    sims.b.dispatch('cmd');
+    if (mode === 'main') {
+      await advanceUntil(() => sims.b.getState().log.length > 0);
+    } else if (mode !== 'queued') {
+      // gates[1] is b's (workers start in player order).
+      const gate = gates[1];
+      gate.hold = true;
+      await advanceUntil(() =>
+        gate.held.some(({ event }) => event.data.type === 'frame' && event.data.inputs > 0)
+      );
+      expect(sims.b.getState().log).toEqual([]);
+    }
+
+    net.setMembers(['a', 'b', 'c']);
+    sync();
+    expect(sims.a.getHostId()).toBe('a');
+    if (mode === 'worker') gates[1].release();
+
+    await advanceUntil(() => sims.c.getState().log.some((l) => l.endsWith(':b:cmd')));
+    await advanceUntil(() => sims.c.getTick() >= sims.a.getTick() && sims.a.getTick() > 40);
+    const log = sims.a.getState().log;
+    for (const p of ['a', 'b', 'c']) sims[p].stop();
+    return log;
+  }
+
+  it('keeps a command the demoted host stepped in a frame still in flight, as on the main thread', async () => {
+    const main = await demoteWithCommandInFlight('main');
+    expect(main.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
+    const worker = await demoteWithCommandInFlight('worker');
+    expect(worker.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
+  });
+
+  it("sends the new host the demoted host's own commands it never stepped", async () => {
+    // Its worker never reports the frame that took it, nor its stop.
+    const lost = await demoteWithCommandInFlight('lost');
+    expect(lost.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
+    // On the main thread: dispatched since its last frame.
+    const queued = await demoteWithCommandInFlight('queued');
+    expect(queued.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
   });
 
   it('steps on the main thread when the worker factory throws', async () => {

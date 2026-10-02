@@ -14,8 +14,9 @@ import { COMPRESS_MIN_LENGTH, canDeflate, deflateText } from './wire';
  * posts a frame at once: the changes since its previous frame, for the main
  * thread to apply to its copy of the state the way a receiver applies a
  * delta. The snapshot message for peers follows once it is serialised and
- * compressed. On demotion the main thread stops the worker and hands over
- * its copy of the state.
+ * compressed. On demotion the main thread stops the worker, applies the
+ * frames it posted before stopping (they hold inputs it took), and once the
+ * worker confirms the stop, hands over its copy of the state.
  *
  * Frames carry the term they were started in; the main thread ignores those
  * of an earlier term, so a frame still in flight when the worker is stopped
@@ -47,7 +48,7 @@ export type ToWorker<TState, TInput> =
   /** Step (true) or hold (false). Held after `start`. */
   | { type: 'run'; run: boolean }
   | { type: 'input'; input: PlayerInput<TInput> }
-  /** Give up authority, drop queued inputs and reset the count of inputs taken. */
+  /** Give up authority, drop queued inputs and reset the count of inputs taken. Answered with `stopped`. */
   | { type: 'stop' };
 
 /** Worker to main thread, after each stepping frame. */
@@ -77,12 +78,20 @@ export interface WorkerMessage {
   deflated?: Uint8Array<ArrayBuffer>;
 }
 
-export type FromWorker = WorkerFrame | WorkerMessage;
+/** Worker to main thread, after a `stop`: no further frame of `term` follows. */
+export interface WorkerStopped {
+  type: 'stopped';
+  term: number;
+}
+
+export type FromWorker = WorkerFrame | WorkerMessage | WorkerStopped;
 
 export function isFromWorker(data: unknown): data is FromWorker {
   if (typeof data !== 'object' || data === null) return false;
   const d = data as { [K in keyof WorkerFrame | keyof WorkerMessage]?: unknown };
-  if (typeof d.term !== 'number' || typeof d.seq !== 'number') return false;
+  if (typeof d.term !== 'number') return false;
+  if (d.type === 'stopped') return true;
+  if (typeof d.seq !== 'number') return false;
   if (d.type === 'frame') return typeof d.tick === 'number' && Number.isFinite(d.inputs);
   return d.type === 'message' && typeof d.message === 'string';
 }
@@ -201,6 +210,7 @@ class WorkerSimulation<TState, TInput> {
         this.sent = null;
         if (this.timer) clearInterval(this.timer.id);
         this.timer = null;
+        this.post({ type: 'stopped', term: this.term });
         break;
     }
   }
