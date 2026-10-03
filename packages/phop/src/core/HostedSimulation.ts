@@ -139,6 +139,9 @@ const now = () => performance.now();
 // snapshots arrive, since the data channel may not be open yet.
 const HANDOVER_RESEND_MS = 250;
 const MIN_HANDOVER_RETRY_MS = 5000;
+// A demoted host's worker reports its last frames and its stop at once; one
+// that hasn't within this (or half the migration grace) is given up on.
+const WORKER_STOP_TIMEOUT_MS = 250;
 // A receiver missing a delta's base asks the host for a keyframe at most this often.
 const RESYNC_RETRY_MS = 500;
 // The host answers a peer's resync requests at most this often.
@@ -186,7 +189,13 @@ export class HostedSimulation<TState, TInput> {
   // Longest we hold waiting for `handoverFrom`'s channel to open.
   private handoverDeadline = 0;
   // Demoted side: the handover still to be delivered.
-  private pendingHandover: { to: string; until: number; lastSent: number } | null = null;
+  private pendingHandover: {
+    to: string;
+    until: number;
+    lastSent: number;
+    /** Its channel reported open (`connectedPeers` may lag behind). */
+    open?: boolean;
+  } | null = null;
   // When our tick last advanced; bounds how far a handover may jump.
   private lastProgressAt = now();
   private readonly absentSince = new Map<string, number>();
@@ -235,6 +244,9 @@ export class HostedSimulation<TState, TInput> {
   private workerAcked = 0;
   // States of the worker's frames whose snapshot messages are still to come, by seq.
   private readonly workerPending = new Map<number, { tick: number; state: TState }>();
+  // Demoted side: the worker term whose frames still apply to our state, the
+  // handover, until the worker confirms its stop (or `until`).
+  private workerDrain: { term: number; until: number } | null = null;
   private readonly snapshotChannelName: string;
 
   constructor(key: string, options: HostedSimulationOptions<TState, TInput>, room: SimulationRoom) {
@@ -297,7 +309,10 @@ export class HostedSimulation<TState, TInput> {
       if (this.workerOwns) this.sendInputToWorker({ playerId: host, input });
       else this.localQueue.push(input);
     } else if (host !== null) {
-      this.inputChannel.send(host, input);
+      // Behind our inputs still waiting to reach the new host (from a
+      // stopped worker, or for its channel to open), so they keep their order.
+      if (this.workerDrain || this.localQueue.length > 0) this.localQueue.push(input);
+      else this.inputChannel.send(host, input);
     }
   };
 
@@ -441,6 +456,8 @@ export class HostedSimulation<TState, TInput> {
       this.lastAppliedTick = -1;
       this.chain = null;
     }
+    // Before the handover below, so a demoted host's worker gets to finish its frames.
+    this.syncWorker();
     if (!isHost && this.wasHost && host !== null && this.isMultiplayer) {
       this.pendingHandover = {
         to: host,
@@ -453,13 +470,18 @@ export class HostedSimulation<TState, TInput> {
       this.pendingHandover = null;
     }
     this.wasHost = isHost;
-    this.syncWorker();
   }
 
   private sendHandover(): void {
+    const t = now();
+    const drain = this.workerDrain;
+    if (drain) {
+      // The worker may have stepped inputs in frames still on their way.
+      if (t < drain.until) return;
+      this.endWorkerDrain();
+    }
     const pending = this.pendingHandover;
     if (!pending) return;
-    const t = now();
     if (t >= pending.until) {
       this.pendingHandover = null;
       return;
@@ -473,15 +495,46 @@ export class HostedSimulation<TState, TInput> {
         seq: ++this.seq,
         state: this.state,
       });
+      // Our inputs not stepped into it go to the new host, as if dispatched
+      // now, once its channel is open: a send before that is dropped, and an
+      // input can't be resent safely.
+      if (pending.open || this.channelOpen(pending.to)) this.sendLocalQueue(pending.to);
     } catch (error) {
       console.error('phop: sending the handover failed:', error);
     }
+  }
+
+  /** Whether our channel to `peerId` is open, as far as the room reports. */
+  private channelOpen(peerId: string): boolean {
+    return this.room.connectedPeers?.includes(peerId) ?? true;
+  }
+
+  /**
+   * Demoted: our queued inputs go to the host once no handover or worker
+   * drain holds them (e.g. the handover expired, or the host changed again).
+   * `open`: a snapshot from the host just arrived over the channel.
+   */
+  private forwardLocalQueue(open = false): void {
+    const host = this.hostId;
+    if (host === null || host === this.room.peerId) return;
+    if (this.workerDrain || this.pendingHandover || this.localQueue.length === 0) return;
+    if (!open && !this.channelOpen(host)) return;
+    try {
+      this.sendLocalQueue(host);
+    } catch (error) {
+      console.error('phop: sending queued inputs failed:', error);
+    }
+  }
+
+  private sendLocalQueue(to: string): void {
+    for (const input of this.localQueue.splice(0)) this.inputChannel.send(to, input);
   }
 
   private handlePeerConnected = (remotePeerId: string): void => {
     if (this.hostId === this.room.peerId) this.sendKeyframe(remotePeerId);
     if (this.pendingHandover?.to === remotePeerId) {
       this.pendingHandover.lastSent = -Infinity;
+      this.pendingHandover.open = true;
       this.sendHandover();
     }
     // The previous host's channel just opened: give its handover time to land.
@@ -556,6 +609,7 @@ export class HostedSimulation<TState, TInput> {
       maxHandoverTick: this.maxHandoverTick(),
     });
     if (!adopt) return;
+    if (this.workerDrain) this.endWorkerDrain();
     this.state = state;
     this.tick = snap.tick;
     this.lastAppliedTick = snap.tick;
@@ -569,8 +623,10 @@ export class HostedSimulation<TState, TInput> {
     } else {
       this.chain = { from: senderId, seq: snap.seq };
     }
-    // The new host's snapshots have overtaken our handover.
+    // The new host's snapshots have overtaken our handover; our inputs it
+    // never got (e.g. reclaimed from the drain just ended) go to it now.
     this.pendingHandover = null;
+    this.forwardLocalQueue(senderId === this.hostId);
     this.bump();
   };
 
@@ -666,6 +722,7 @@ export class HostedSimulation<TState, TInput> {
 
     if (this.hostId !== self) {
       this.sendHandover();
+      this.forwardLocalQueue();
       this.hold(t);
       return;
     }
@@ -796,6 +853,7 @@ export class HostedSimulation<TState, TInput> {
     this.workerInputs = [];
     this.workerAcked = 0;
     this.workerPending.clear();
+    this.workerDrain = null;
   }
 
   private postToWorker(message: ToWorker<TState, TInput>): void {
@@ -820,10 +878,13 @@ export class HostedSimulation<TState, TInput> {
    */
   private reclaimWorkerInputs(remote: boolean): void {
     const self = this.room.peerId;
+    const mine: TInput[] = [];
     for (const i of this.workerInputs) {
-      if (i.playerId === self) this.localQueue.push(i.input);
+      if (i.playerId === self) mine.push(i.input);
       else if (remote) this.remoteQueue.push(i);
     }
+    // Dispatched before anything queued here since (during a drain).
+    this.localQueue.unshift(...mine);
     this.workerInputs = [];
   }
 
@@ -853,16 +914,33 @@ export class HostedSimulation<TState, TInput> {
     if (!this.worker) return;
     const isHost = this.hostId !== null && this.hostId === this.room.peerId;
     if (isHost && !this.workerOwns) {
+      if (this.workerDrain) this.endWorkerDrain();
       this.stopWorker();
       this.startWorkerTerm(true);
     } else if (!isHost && this.workerOwns) {
-      // Our copy of the state is the handover; frames still in flight were
-      // never sent to anyone, so they are dropped with the term.
-      this.stopWorker();
+      // Our copy of the state is the handover. Frames still in flight hold
+      // inputs the worker took, so they are applied (not broadcast) until it
+      // confirms the stop; `sendHandover` waits for that.
+      this.postToWorker({ type: 'stop' });
       this.workerOwns = false;
-      this.workerTerm++;
       this.workerPending.clear();
+      this.workerDrain = {
+        term: this.workerTerm,
+        until: now() + Math.min(WORKER_STOP_TIMEOUT_MS, this.graceMs / 2),
+      };
     }
+  }
+
+  /**
+   * Stop applying the stopped worker's frames. Our inputs it never stepped
+   * into our state are queued here again (and go to the new host with the
+   * handover); others' are dropped, as a demoted host's queue is.
+   */
+  private endWorkerDrain(): void {
+    this.workerDrain = null;
+    this.workerTerm++;
+    this.reclaimWorkerInputs(false);
+    this.workerAcked = 0;
   }
 
   /**
@@ -908,10 +986,20 @@ export class HostedSimulation<TState, TInput> {
 
   /** Apply a worker frame to our copy of the state, or send a frame's snapshot. */
   private handleWorkerFrame(worker: SimulationWorker, data: unknown): void {
-    if (worker !== this.worker || !this.workerOwns || !isFromWorker(data)) return;
+    if (worker !== this.worker || !isFromWorker(data)) return;
     if (data.term !== this.workerTerm) return;
+    const draining = this.workerDrain !== null;
+    if (data.type === 'stopped') {
+      if (!draining) return;
+      this.endWorkerDrain();
+      this.sendHandover();
+      return;
+    }
+    if (!this.workerOwns && !draining) return;
     if (data.type === 'message') {
-      this.sendWorkerMessage(data.seq, data.message, data.delta, data.deflated);
+      // A demoted host's snapshots go to no one: the handover replaces them.
+      if (this.workerOwns)
+        this.sendWorkerMessage(data.seq, data.message, data.delta, data.deflated);
       return;
     }
     const frame = data;
@@ -924,18 +1012,22 @@ export class HostedSimulation<TState, TInput> {
     } catch (error) {
       // Can't happen unless frames were lost: restart the worker from our copy.
       console.error('phop: applying a simulation worker frame failed:', error);
-      this.startWorkerTerm(false);
+      if (this.workerOwns) this.startWorkerTerm(false);
+      else this.endWorkerDrain();
       return;
     }
     this.workerInputs.splice(0, frame.inputs - this.workerAcked);
     this.workerAcked = frame.inputs;
     this.state = state as TState;
     this.tick = frame.tick;
-    this.lastAppliedTick = frame.tick;
     this.lastProgressAt = now();
     this.seq = frame.seq;
-    if (this.isMultiplayer)
-      this.workerPending.set(frame.seq, { tick: frame.tick, state: this.state });
+    // Demoted, the guard is for the new host's snapshots, which may be behind ours.
+    if (this.workerOwns) {
+      this.lastAppliedTick = frame.tick;
+      if (this.isMultiplayer)
+        this.workerPending.set(frame.seq, { tick: frame.tick, state: this.state });
+    }
     this.bump();
   }
 
@@ -969,8 +1061,10 @@ export class HostedSimulation<TState, TInput> {
     if (worker !== this.worker) return;
     console.error('phop: the simulation worker failed; stepping here instead:', event);
     const owned = this.workerOwns;
-    // Inputs it hadn't taken, or took in steps we never saw, are stepped here.
+    // Inputs it hadn't taken, or took in steps we never saw, are stepped here
+    // (or, demoted, ours go to the new host).
     if (owned) this.reclaimWorkerInputs(true);
+    else if (this.workerDrain) this.endWorkerDrain();
     this.dropWorker();
     if (!owned) return;
     // `step` may mutate it in place, and our copy shares objects with
