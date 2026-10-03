@@ -246,6 +246,33 @@ describe('HostedSimulation', () => {
     expect(sims.a.getTick()).toBeGreaterThanOrEqual(bTick);
   });
 
+  it("sends the demoted host's queued inputs only once the new host's channel opens", () => {
+    const { net, sims, sync } = setup(['a', 'b', 'c'], {}, { requireLinks: true });
+    net.openLink('a', 'b');
+    net.openLink('a', 'c');
+    net.openLink('b', 'c');
+    vi.advanceTimersByTime(500);
+    net.closeLink('a', 'b');
+    net.closeLink('a', 'c');
+    net.setMembers(['b', 'c'], ['b', 'c']);
+    net.setMembers(['a'], ['a']);
+    sync();
+    vi.advanceTimersByTime(2000);
+
+    // b queues a command and is demoted before its next step, while its
+    // channel to a is still closed.
+    sims.b.dispatch('cmd');
+    net.setMembers(['a', 'b', 'c']);
+    sync();
+    vi.advanceTimersByTime(300);
+    // Our inputs go once b's channel to a opens, before its room catches up.
+    net.openLink('a', 'b');
+    net.openLink('a', 'c');
+    sync();
+    vi.advanceTimersByTime(1000);
+    expect(sims.a.getState().log.filter((l) => l === 'b:cmd')).toHaveLength(1);
+  });
+
   it('holds while cut off instead of simulating alone', () => {
     const { net, sims, sync } = setup(['a', 'b', 'c'], {
       absence: { timeoutMs: 100, toInput: () => 'resign' },

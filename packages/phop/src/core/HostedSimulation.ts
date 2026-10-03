@@ -189,7 +189,13 @@ export class HostedSimulation<TState, TInput> {
   // Longest we hold waiting for `handoverFrom`'s channel to open.
   private handoverDeadline = 0;
   // Demoted side: the handover still to be delivered.
-  private pendingHandover: { to: string; until: number; lastSent: number } | null = null;
+  private pendingHandover: {
+    to: string;
+    until: number;
+    lastSent: number;
+    /** Its channel reported open (`connectedPeers` may lag behind). */
+    open?: boolean;
+  } | null = null;
   // When our tick last advanced; bounds how far a handover may jump.
   private lastProgressAt = now();
   private readonly absentSince = new Map<string, number>();
@@ -303,7 +309,10 @@ export class HostedSimulation<TState, TInput> {
       if (this.workerOwns) this.sendInputToWorker({ playerId: host, input });
       else this.localQueue.push(input);
     } else if (host !== null) {
-      this.inputChannel.send(host, input);
+      // Behind our inputs still waiting to reach the new host (from a
+      // stopped worker, or for its channel to open), so they keep their order.
+      if (this.workerDrain || this.localQueue.length > 0) this.localQueue.push(input);
+      else this.inputChannel.send(host, input);
     }
   };
 
@@ -486,17 +495,46 @@ export class HostedSimulation<TState, TInput> {
         seq: ++this.seq,
         state: this.state,
       });
-      // Our inputs not stepped into it go to the new host, as if dispatched now.
-      for (const input of this.localQueue.splice(0)) this.inputChannel.send(pending.to, input);
+      // Our inputs not stepped into it go to the new host, as if dispatched
+      // now, once its channel is open: a send before that is dropped, and an
+      // input can't be resent safely.
+      if (pending.open || this.channelOpen(pending.to)) this.sendLocalQueue(pending.to);
     } catch (error) {
       console.error('phop: sending the handover failed:', error);
     }
+  }
+
+  /** Whether our channel to `peerId` is open, as far as the room reports. */
+  private channelOpen(peerId: string): boolean {
+    return this.room.connectedPeers?.includes(peerId) ?? true;
+  }
+
+  /**
+   * Demoted: our queued inputs go to the host once no handover or worker
+   * drain holds them (e.g. the handover expired, or the host changed again).
+   * `open`: a snapshot from the host just arrived over the channel.
+   */
+  private forwardLocalQueue(open = false): void {
+    const host = this.hostId;
+    if (host === null || host === this.room.peerId) return;
+    if (this.workerDrain || this.pendingHandover || this.localQueue.length === 0) return;
+    if (!open && !this.channelOpen(host)) return;
+    try {
+      this.sendLocalQueue(host);
+    } catch (error) {
+      console.error('phop: sending queued inputs failed:', error);
+    }
+  }
+
+  private sendLocalQueue(to: string): void {
+    for (const input of this.localQueue.splice(0)) this.inputChannel.send(to, input);
   }
 
   private handlePeerConnected = (remotePeerId: string): void => {
     if (this.hostId === this.room.peerId) this.sendKeyframe(remotePeerId);
     if (this.pendingHandover?.to === remotePeerId) {
       this.pendingHandover.lastSent = -Infinity;
+      this.pendingHandover.open = true;
       this.sendHandover();
     }
     // The previous host's channel just opened: give its handover time to land.
@@ -585,8 +623,10 @@ export class HostedSimulation<TState, TInput> {
     } else {
       this.chain = { from: senderId, seq: snap.seq };
     }
-    // The new host's snapshots have overtaken our handover.
+    // The new host's snapshots have overtaken our handover; our inputs it
+    // never got (e.g. reclaimed from the drain just ended) go to it now.
     this.pendingHandover = null;
+    this.forwardLocalQueue(senderId === this.hostId);
     this.bump();
   };
 
@@ -682,6 +722,7 @@ export class HostedSimulation<TState, TInput> {
 
     if (this.hostId !== self) {
       this.sendHandover();
+      this.forwardLocalQueue();
       this.hold(t);
       return;
     }
@@ -837,10 +878,13 @@ export class HostedSimulation<TState, TInput> {
    */
   private reclaimWorkerInputs(remote: boolean): void {
     const self = this.room.peerId;
+    const mine: TInput[] = [];
     for (const i of this.workerInputs) {
-      if (i.playerId === self) this.localQueue.push(i.input);
+      if (i.playerId === self) mine.push(i.input);
       else if (remote) this.remoteQueue.push(i);
     }
+    // Dispatched before anything queued here since (during a drain).
+    this.localQueue.unshift(...mine);
     this.workerInputs = [];
   }
 

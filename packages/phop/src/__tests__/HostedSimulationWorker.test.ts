@@ -341,9 +341,13 @@ describe('HostedSimulation in a worker', () => {
    * returns. On the main thread (`main`), b has stepped it; with `queued`,
    * not yet. In worker mode, b's worker has stepped it in a frame still on
    * its way to b's main thread (delivered after the demotion, or, with
-   * `lost`, never).
+   * `lost`, never). With `later`, b dispatches that command once demoted;
+   * with `adoptFirst`, a's first snapshot reaches b before b's handover goes.
    */
-  async function demoteWithCommandInFlight(mode: 'main' | 'queued' | 'worker' | 'lost') {
+  async function demoteWithCommandInFlight(
+    mode: 'main' | 'queued' | 'worker' | 'lost',
+    { later, adoptFirst = false }: { later?: string; adoptFirst?: boolean } = {}
+  ) {
     const gates: ReturnType<typeof gatedWorker>['gate'][] = [];
     const { net, sims, sync } = setup(['a', 'b', 'c'], {
       worker:
@@ -377,9 +381,23 @@ describe('HostedSimulation in a worker', () => {
     net.setMembers(['a', 'b', 'c']);
     sync();
     expect(sims.a.getHostId()).toBe('a');
+    if (later) sims.b.dispatch(later);
+    if (adoptFirst) {
+      net.inject('a', 'b', {
+        ch: 'sim:snapshot',
+        d: {
+          hostId: 'a',
+          seq: 1,
+          tick: sims.a.getTick(),
+          state: JSON.parse(hash(sims.a.getState())),
+        },
+      });
+    }
     if (mode === 'worker') gates[1].release();
 
     await advanceUntil(() => sims.c.getState().log.some((l) => l.endsWith(':b:cmd')));
+    if (later)
+      await advanceUntil(() => sims.c.getState().log.some((l) => l.endsWith(`:b:${later}`)));
     await advanceUntil(() => sims.c.getTick() >= sims.a.getTick() && sims.a.getTick() > 40);
     const log = sims.a.getState().log;
     for (const p of ['a', 'b', 'c']) sims[p].stop();
@@ -400,6 +418,18 @@ describe('HostedSimulation in a worker', () => {
     // On the main thread: dispatched since its last frame.
     const queued = await demoteWithCommandInFlight('queued');
     expect(queued.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
+  });
+
+  it("sends the demoted host's reclaimed commands when the new host's snapshot ends the drain", async () => {
+    const log = await demoteWithCommandInFlight('lost', { adoptFirst: true });
+    expect(log.filter((l) => l.endsWith(':b:cmd'))).toHaveLength(1);
+  });
+
+  it('keeps the order of commands the demoted host dispatches while its worker drains', async () => {
+    const log = await demoteWithCommandInFlight('lost', { later: 'cmd2' });
+    const at = (input: string) => log.findIndex((l) => l.endsWith(`:b:${input}`));
+    expect(at('cmd')).toBeGreaterThanOrEqual(0);
+    expect(at('cmd')).toBeLessThan(at('cmd2'));
   });
 
   it('steps on the main thread when the worker factory throws', async () => {
