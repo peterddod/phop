@@ -1,3 +1,11 @@
+## [1.10.1](https://github.com/peterddod/phop/compare/v1.10.0...v1.10.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **phop:** deliver a demoted host's queued inputs in order, once the channel is open ([d9169ef](https://github.com/peterddod/phop/commit/d9169ef320731dd1af6d1bd2dfd4555f17b949da))
+* **phop:** keep worker-stepped inputs across demotion ([3813500](https://github.com/peterddod/phop/commit/381350033780d43f209feb8003ed1ddadb141b60))
+
 # [1.10.0](https://github.com/peterddod/phop/compare/v1.9.0...v1.10.0) (2026-10-02)
 
 
