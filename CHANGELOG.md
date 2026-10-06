@@ -1,3 +1,11 @@
+## [1.10.2](https://github.com/peterddod/phop/compare/v1.10.1...v1.10.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **signalling-server:** harden against malformed input, abuse and leaks ([67c4abd](https://github.com/peterddod/phop/commit/67c4abd6db5af039435cc0cbb0c050d2573fdda1))
+* **signalling-server:** name test file explicitly for Node 22 ([63d597d](https://github.com/peterddod/phop/commit/63d597dd9f78f44bddda240492df5a211cd262a8))
+
 ## [1.10.1](https://github.com/peterddod/phop/compare/v1.10.0...v1.10.1) (2026-10-03)
 
 
