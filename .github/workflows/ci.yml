@@ -95,11 +95,28 @@ jobs:
       - name: Run phop unit tests
         run: bun --filter=@peterddod/phop run test
 
+  server-unit-test:
+    name: Signalling server tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ".bun-version"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run signalling server tests
+        run: bun --filter=signalling-server run test
+
   semantic-release:
     name: Release
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (needs.changes.outputs.phop == 'true' || needs.changes.outputs.server == 'true')
-    needs: [lint, changes, integration-test, phop-unit-test]
+    needs: [lint, changes, integration-test, phop-unit-test, server-unit-test]
     permissions:
       contents: write
       issues: write
