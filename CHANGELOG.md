@@ -1,3 +1,10 @@
+## [1.10.3](https://github.com/peterddod/phop/compare/v1.10.2...v1.10.3) (2026-10-11)
+
+
+### Bug Fixes
+
+* **ci:** build release artifacts only when a release is cut ([85da180](https://github.com/peterddod/phop/commit/85da18096c8598e4e07df481b654eecf92ccf61e))
+
 ## [1.10.2](https://github.com/peterddod/phop/compare/v1.10.1...v1.10.2) (2026-10-06)
 
 
