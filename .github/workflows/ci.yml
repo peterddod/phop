@@ -167,7 +167,7 @@ jobs:
   build-lib:
     name: Build library
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && needs.semantic-release.outputs.phop == 'true'
+    if: github.event_name == 'push' && needs.semantic-release.outputs.released == 'true' && needs.semantic-release.outputs.phop == 'true'
     needs: [semantic-release]
     steps:
       - uses: actions/checkout@v7
@@ -195,7 +195,7 @@ jobs:
   build-server:
     name: Build server
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && needs.semantic-release.outputs.server == 'true'
+    if: github.event_name == 'push' && needs.semantic-release.outputs.released == 'true' && needs.semantic-release.outputs.server == 'true'
     needs: [semantic-release]
     steps:
       - uses: actions/checkout@v7
