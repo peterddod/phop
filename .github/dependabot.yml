@@ -1,0 +1,60 @@
+version: 2
+
+updates:
+  # Bun workspaces monorepo. No lockfile is committed (see .gitignore), so the
+  # npm ecosystem updates package.json manifests only; the root entry covers
+  # every workspace under packages/*. Ranges are only raised when a release
+  # falls outside them, which keeps the published peer range (react >=18) as is.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+      major:
+        update-types: [major]
+
+  # GitHub Actions used by .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
+      actions-major:
+        update-types: [major]
+
+  # Base images for the signalling server Docker image.
+  - package-ecosystem: docker
+    directory: /packages/signalling-server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      docker-minor-and-patch:
+        update-types: [minor, patch]
+      docker-major:
+        update-types: [major]
