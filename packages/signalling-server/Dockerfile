@@ -16,7 +16,7 @@ COPY packages/signalling-server/package.json .
 RUN bun install --production
 
 # Run on Node: Bun's built-in `ws` shim ignores maxPayload.
-FROM node:24-alpine
+FROM node:26-alpine
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
